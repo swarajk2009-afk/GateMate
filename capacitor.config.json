@@ -1,0 +1,8 @@
+{
+  "appId": "com.loyalmates.gatemate",
+  "appName": "GateMate",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
