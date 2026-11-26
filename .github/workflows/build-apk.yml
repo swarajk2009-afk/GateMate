@@ -17,20 +17,21 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Set up Java 17
+      - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Install dependencies & build Vite web app
         run: |
-          npm install
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-          npm run build
+          npm install --legacy-peer-deps
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 --legacy-peer-deps
+          npx vite build
 
       - name: Initialize Android project & add Camera permission
         run: |
+          rm -rf android
           npx cap add android
           npx cap sync android
           sed -i 's/<\/manifest>/<uses-permission android:name="android.permission.CAMERA" \/><\/manifest>/' android/app/src/main/AndroidManifest.xml
