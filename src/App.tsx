@@ -5,7 +5,7 @@ import {
   KeyRound, Plus, AlertTriangle, Building2, Pencil, Check, X, Camera, Layers, Settings
 } from 'lucide-react';
 
-const DEFAULT_AMENITIES = ['Clubhouse', 'Badminton Court', 'Gym', 'Guest Room'];
+const DEFAULT_AMENITIES = ['Gym', 'Guest Room'];
 const DEFAULT_SLOTS = [
   'Full Day (08:00 AM - 10:00 PM)',
   '07:00 AM - 09:00 AM',
