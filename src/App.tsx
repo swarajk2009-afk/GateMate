@@ -1,10 +1,10 @@
 // @ts-nocheck
-
 import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
+import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera';
 import {
   Shield, Users, CreditCard, Wrench, Bell, Clock, LogOut,
-  KeyRound, Plus, AlertTriangle, Building2, Pencil, Check, X, Camera, Layers, Settings, Crown, UserPlus
+  KeyRound, Plus, AlertTriangle, Building2, Pencil, Check, X, Camera, Layers, Settings, Crown, UserPlus, Share2, Copy, ExternalLink, CheckCircle2, Home, UserCheck, UserMinus
 } from 'lucide-react';
 
 const DEFAULT_AMENITIES = ['Clubhouse', 'Badminton Court', 'Gym', 'Guest Room'];
@@ -16,26 +16,36 @@ const DEFAULT_SLOTS = [
 ];
 const DEFAULT_CATEGORIES = ['Plumbing', 'Electrical', 'Housekeeping', 'Lift / Common Area'];
 
-function compressImage(file, maxWidth = 480, quality = 0.7) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        const scale = Math.min(1, maxWidth / img.width);
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-      img.onerror = reject;
-      img.src = e.target.result;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+function shareNoticeToWhatsApp(apartmentName, title, body) {
+  const message =
+    `*${apartmentName || 'Society'} — Official Notice*\n\n` +
+    `*${title.trim()}*\n` +
+    `${body.trim()}\n\n` +
+    `_Sent via GateMate_`;
+  const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(message)}`;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function buildUpiPaymentUrl({ upiId, payeeName, amount, flatNumber, billingMonth }) {
+  const note = `Flat ${flatNumber} - ${billingMonth}`;
+  const params = new URLSearchParams({
+    pa: upiId.trim(),
+    pn: (payeeName || 'Society RWA').trim(),
+    am: Number(amount).toFixed(2),
+    cu: 'INR',
+    tn: note,
   });
+  return `upi://pay?${params.toString()}`;
+}
+
+function launchUpiIntent(upiUrl) {
+  window.location.href = upiUrl;
+}
+
+function formatResidentTypeLabel(type) {
+  if (type === 'family') return 'Family Member';
+  if (type === 'tenant') return 'Tenant';
+  return 'Owner';
 }
 
 export default function App() {
@@ -134,14 +144,35 @@ export default function App() {
     if (!data) {
       const meta = user.user_metadata || {};
       const role = meta.role || 'resident';
+      const normalizedFlat = role === 'resident' && meta.flat_number
+        ? meta.flat_number.toUpperCase().trim()
+        : null;
+      const residentType = role === 'resident' ? (meta.resident_type || 'owner') : null;
+
+      let shouldBePrimary = false;
+      if (role === 'resident' && residentType === 'owner' && normalizedFlat && meta.apartment_id) {
+        const { data: existingPrimary } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('apartment_id', meta.apartment_id)
+          .eq('flat_number', normalizedFlat)
+          .eq('is_flat_primary', true)
+          .maybeSingle();
+        if (!existingPrimary) {
+          shouldBePrimary = true;
+        }
+      }
+
       const { data: created, error: insertError } = await supabase
         .from('profiles')
         .insert({
           id: user.id,
           full_name: meta.full_name || user.email.split('@')[0],
           role,
-          flat_number: meta.flat_number || null,
+          flat_number: normalizedFlat,
           apartment_id: meta.apartment_id || null,
+          resident_type: residentType,
+          is_flat_primary: shouldBePrimary,
           is_approved: role === 'dev',
         })
         .select()
@@ -201,6 +232,13 @@ export default function App() {
   }
 
   if (!profile.is_approved) {
+    const approverLabel =
+      profile.role === 'admin'
+        ? 'the Super User (Dev)'
+        : profile.role === 'resident' && profile.resident_type && profile.resident_type !== 'owner'
+        ? `your Flat ${profile.flat_number} Primary Owner or RWA Admin`
+        : 'your Apartment RWA Admin';
+
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-50 via-slate-50 to-purple-50 p-4">
         <div className="max-w-md w-full bg-white p-8 rounded-2xl shadow-md border border-indigo-100 text-center">
@@ -210,9 +248,11 @@ export default function App() {
           <h2 className="text-xl font-bold text-slate-900 mb-2">Pending Approval</h2>
           <p className="text-sm text-slate-600 mb-6">
             Hi <span className="font-semibold text-slate-900">{profile.full_name}</span>, your account (
-            <span className="capitalize font-medium text-indigo-600">{profile.role}</span>
+            <span className="capitalize font-medium text-indigo-600">
+              {profile.role === 'resident' ? formatResidentTypeLabel(profile.resident_type) : profile.role}
+            </span>
             {profile.flat_number ? ` • Flat ${profile.flat_number}` : ''}) is awaiting verification by{' '}
-            {profile.role === 'admin' ? 'the Super User (Dev)' : 'your Apartment RWA Admin'}.
+            {approverLabel}.
           </p>
           <div className="flex gap-3 justify-center">
             <button
@@ -254,9 +294,9 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-indigo-50/30 to-slate-100 text-slate-900">
       <header className="bg-gradient-to-r from-indigo-800 via-indigo-700 to-violet-800 text-white shadow-md sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="bg-white/15 backdrop-blur-sm p-2 rounded-xl border border-white/20">
+        <div className="max-w-6xl mx-auto px-3 sm:px-4 h-16 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="bg-white/15 backdrop-blur-sm p-2 rounded-xl border border-white/20 shrink-0">
               {profile.role === 'dev' ? <Crown className="w-5 h-5 text-amber-300" /> : <Building2 className="w-5 h-5 text-white" />}
             </div>
 
@@ -269,7 +309,7 @@ export default function App() {
                   value={draftName}
                   onChange={(e) => setDraftName(e.target.value)}
                   placeholder="Enter Apartment Name"
-                  className="px-3 py-1 text-sm font-bold text-slate-900 bg-white border border-indigo-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300 w-44 sm:w-60"
+                  className="px-2.5 py-1 text-sm font-bold text-slate-900 bg-white border border-indigo-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300 w-36 sm:w-60"
                 />
                 <button type="submit" disabled={savingName} title="Save" className="p-1.5 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600">
                   <Check className="w-4 h-4" />
@@ -279,9 +319,9 @@ export default function App() {
                 </button>
               </form>
             ) : (
-              <div>
+              <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <h1 className="font-bold text-lg leading-tight tracking-tight">{headerTitle}</h1>
+                  <h1 className="font-bold text-base sm:text-lg leading-tight tracking-tight truncate">{headerTitle}</h1>
                   {profile.role === 'admin' && apartment && (
                     <button
                       onClick={() => {
@@ -289,37 +329,44 @@ export default function App() {
                         setIsEditingName(true);
                       }}
                       title="Edit Apartment Name"
-                      className="p-1 text-indigo-200 hover:text-white hover:bg-white/15 rounded-lg transition"
+                      className="p-1 text-indigo-200 hover:text-white hover:bg-white/15 rounded-lg transition shrink-0"
                     >
                       <Pencil className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
-                <p className="text-xs text-indigo-200">{headerSubtitle}</p>
+                <p className="text-[11px] sm:text-xs text-indigo-200 truncate">{headerSubtitle}</p>
               </div>
             )}
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="text-right hidden sm:block">
-              <p className="text-sm font-semibold text-white">{profile.full_name}</p>
-              <span className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded-full border capitalize ${roleBadgeColor}`}>
-                {profile.role === 'dev' ? 'Super User (Dev)' : profile.role}
-                {profile.flat_number ? ` • Flat ${profile.flat_number}` : ''}
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            <div className="text-right">
+              <p className="text-xs sm:text-sm font-semibold text-white leading-tight max-w-[90px] sm:max-w-none truncate">
+                {profile.full_name}
+              </p>
+              <span className={`inline-block text-[10px] sm:text-[11px] font-semibold px-2 py-0.5 rounded-full border capitalize ${roleBadgeColor}`}>
+                {profile.role === 'dev'
+                  ? 'Super User'
+                  : profile.role === 'resident'
+                  ? formatResidentTypeLabel(profile.resident_type)
+                  : profile.role}
+                {profile.flat_number ? ` • ${profile.flat_number}` : ''}
               </span>
             </div>
             <button
               onClick={handleSignOut}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-white/15 hover:bg-red-500/90 border border-white/20 rounded-lg transition"
+              title="Logout"
+              className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm font-medium text-white bg-white/15 hover:bg-red-500/90 border border-white/20 rounded-lg transition"
             >
               <LogOut className="w-4 h-4" />
-              <span>Logout</span>
+              <span className="hidden sm:inline">Logout</span>
             </button>
           </div>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6">
+      <main className="max-w-6xl mx-auto px-3 sm:px-4 py-5 sm:py-6">
         {profile.role === 'dev' && (
           <SuperDevDashboard
             apartmentsList={apartmentsList}
@@ -347,16 +394,17 @@ export default function App() {
   );
 }
 
-/* ==================== 1. AUTH SCREEN (WITH SUPER USER OPTION) ==================== */
+/* ==================== 1. AUTH SCREEN (WITH RESIDENT TYPE SELECTOR) ==================== */
 function AuthScreen({ apartmentsList, refreshApartments }) {
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [role, setRole] = useState('resident');
+  const [residentType, setResidentType] = useState('owner');
   const [apartmentId, setApartmentId] = useState('');
   const [flatNumber, setFlatNumber] = useState('');
-  const [loginMode, setLoginMode] = useState('standard'); // 'standard' | 'dev'
+  const [loginMode, setLoginMode] = useState('standard');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -391,6 +439,7 @@ function AuthScreen({ apartmentsList, refreshApartments }) {
             role,
             apartment_id: role === 'dev' ? null : apartmentId,
             flat_number: role === 'resident' ? flatNumber.toUpperCase().trim() : null,
+            resident_type: role === 'resident' ? residentType : null,
           },
         },
       });
@@ -405,16 +454,15 @@ function AuthScreen({ apartmentsList, refreshApartments }) {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-950 via-indigo-900 to-violet-950 p-4">
-      <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl border border-indigo-100 p-8">
+      <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl border border-indigo-100 p-6 sm:p-8">
         <div className="flex flex-col items-center justify-center mb-5">
           <div className="bg-gradient-to-tr from-indigo-600 to-violet-600 p-3 rounded-2xl text-white shadow-md mb-3">
             <Shield className="w-7 h-7" />
           </div>
           <span className="text-2xl font-extrabold text-slate-900 tracking-tight">GateMate</span>
-          <span className="text-xs text-slate-500 mt-0.5">Multi-Apartment Gated Community Platform</span>
+          <span className="text-xs text-slate-500 mt-0.5 text-center">Multi-Apartment Gated Community Platform</span>
         </div>
 
-        {/* Portal Mode Switcher: Society Login vs Super User (Dev) */}
         <div className="grid grid-cols-2 gap-1.5 bg-slate-100 p-1 rounded-xl mb-5 text-xs font-semibold">
           <button
             type="button"
@@ -507,16 +555,30 @@ function AuthScreen({ apartmentsList, refreshApartments }) {
                   </div>
 
                   {role === 'resident' && (
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Flat Number</label>
-                      <input
-                        type="text"
-                        required
-                        value={flatNumber}
-                        onChange={(e) => setFlatNumber(e.target.value)}
-                        placeholder="e.g. B-402"
-                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                      />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Flat Number</label>
+                        <input
+                          type="text"
+                          required
+                          value={flatNumber}
+                          onChange={(e) => setFlatNumber(e.target.value)}
+                          placeholder="e.g. B-402"
+                          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Resident Type</label>
+                        <select
+                          value={residentType}
+                          onChange={(e) => setResidentType(e.target.value)}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        >
+                          <option value="owner">Owner</option>
+                          <option value="family">Family Member</option>
+                          <option value="tenant">Tenant</option>
+                        </select>
+                      </div>
                     </div>
                   )}
                 </>
@@ -581,13 +643,12 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
   const [aptName, setAptName] = useState('');
   const [aptAddress, setAptAddress] = useState('');
   const [aptTagline, setAptTagline] = useState('Smart Society Portal');
+  const [aptUpiId, setAptUpiId] = useState('');
   const [creatingApt, setCreatingApt] = useState(false);
 
   const [allProfiles, setAllProfiles] = useState([]);
   const [selectedAptForAdmin, setSelectedAptForAdmin] = useState('');
-  const [adminUserId, setAdminUserId] = useState('');
 
-  // Quick-assign new Admin by creating/promoting an existing registered user
   const [newAdminName, setNewAdminName] = useState('');
   const [newAdminEmail, setNewAdminEmail] = useState('');
   const [newAdminPass, setNewAdminPass] = useState('');
@@ -620,6 +681,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
         name: aptName.trim(),
         address: aptAddress.trim() || null,
         tagline: aptTagline.trim() || 'Smart Society Portal',
+        upi_id: aptUpiId.trim() || null,
       })
       .select()
       .single();
@@ -629,6 +691,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
     } else {
       setAptName('');
       setAptAddress('');
+      setAptUpiId('');
       await refreshApartments();
       if (data?.id) setSelectedAptForAdmin(data.id);
       alert(`Apartment "${data.name}" created! Now assign an Admin to it.`);
@@ -644,7 +707,6 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
     }
     setCreatingAdmin(true);
 
-    // Save current dev session so signUp doesn't overwrite it
     const { data: currentSessionData } = await supabase.auth.getSession();
     const devSession = currentSessionData?.session;
 
@@ -671,7 +733,6 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
         is_approved: true,
       });
 
-      // Restore Dev super user session immediately
       if (devSession) {
         await supabase.auth.setSession({
           access_token: devSession.access_token,
@@ -714,7 +775,6 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
   return (
     <div className="space-y-6">
       <div className="grid md:grid-cols-2 gap-6">
-        {/* 1. Add New Apartment */}
         <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-amber-500 space-y-4">
           <h3 className="font-bold text-slate-800 flex items-center gap-2">
             <Building2 className="w-5 h-5 text-amber-600" /> Add New Apartment / Society
@@ -741,14 +801,26 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
                 className="w-full px-3 py-2 border rounded-lg text-sm"
               />
             </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Portal Subtitle</label>
-              <input
-                type="text"
-                value={aptTagline}
-                onChange={(e) => setAptTagline(e.target.value)}
-                className="w-full px-3 py-2 border rounded-lg text-sm"
-              />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Portal Subtitle</label>
+                <input
+                  type="text"
+                  value={aptTagline}
+                  onChange={(e) => setAptTagline(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Society UPI ID</label>
+                <input
+                  type="text"
+                  placeholder="e.g. societyrwa@sbi"
+                  value={aptUpiId}
+                  onChange={(e) => setAptUpiId(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
             </div>
             <button
               disabled={creatingApt}
@@ -759,7 +831,6 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
           </form>
         </div>
 
-        {/* 2. Create & Assign Admin User to Apartment */}
         <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-indigo-600 space-y-4">
           <h3 className="font-bold text-slate-800 flex items-center gap-2">
             <UserPlus className="w-5 h-5 text-indigo-600" /> Add Admin User to Apartment
@@ -792,7 +863,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
                 className="w-full px-3 py-2 border rounded-lg text-sm"
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Admin Email</label>
                 <input
@@ -827,7 +898,6 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
         </div>
       </div>
 
-      {/* 3. Registered Apartments Overview */}
       <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
         <h3 className="font-bold text-slate-800 mb-3">Registered Apartments ({apartmentsList.length})</h3>
         <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
@@ -844,6 +914,9 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
                     {aptAdmins.length > 0 ? aptAdmins.map((a) => a.full_name).join(', ') : 'None assigned'}
                   </p>
                   <p>
+                    <strong>UPI ID:</strong> {apt.upi_id || 'Not set'}
+                  </p>
+                  <p>
                     <strong>Residents:</strong> {aptResidents.length}
                   </p>
                 </div>
@@ -853,7 +926,6 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
         </div>
       </div>
 
-      {/* 4. All Users Across All Apartments */}
       <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
         <h3 className="font-bold text-slate-800 mb-3">All Platform Users ({allProfiles.length})</h3>
         <div className="overflow-x-auto">
@@ -872,7 +944,9 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
               {allProfiles.map((u) => (
                 <tr key={u.id}>
                   <td className="p-2.5 font-semibold text-slate-900">{u.full_name}</td>
-                  <td className="p-2.5 capitalize">{u.role}</td>
+                  <td className="p-2.5 capitalize">
+                    {u.role === 'resident' ? formatResidentTypeLabel(u.resident_type) : u.role}
+                  </td>
                   <td className="p-2.5">{u.role === 'dev' ? 'All Apartments' : getAptName(u.apartment_id)}</td>
                   <td className="p-2.5">{u.flat_number || '—'}</td>
                   <td className="p-2.5">
@@ -908,7 +982,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
   );
 }
 
-/* ==================== 3. RESIDENT DASHBOARD (SCOPED TO APARTMENT) ==================== */
+/* ==================== 3. RESIDENT DASHBOARD (MULTI-USER FLAT MANAGEMENT + UPI) ==================== */
 function ResidentDashboard({ profile, apartment }) {
   const amenitiesList = apartment?.amenities?.length ? apartment.amenities : DEFAULT_AMENITIES;
   const slotsList = apartment?.amenity_slots?.length ? apartment.amenity_slots : DEFAULT_SLOTS;
@@ -921,6 +995,13 @@ function ResidentDashboard({ profile, apartment }) {
   const [bookings, setBookings] = useState([]);
   const [notices, setNotices] = useState([]);
   const [votes, setVotes] = useState([]);
+  const [flatMembers, setFlatMembers] = useState([]);
+
+  // UPI Payment Modal State
+  const [activePayInvoice, setActivePayInvoice] = useState(null);
+  const [utrInput, setUtrInput] = useState('');
+  const [submittingUtr, setSubmittingUtr] = useState(false);
+  const [copiedUpi, setCopiedUpi] = useState(false);
 
   const [vName, setVName] = useState('');
   const [vType, setVType] = useState('Guest');
@@ -953,6 +1034,43 @@ function ResidentDashboard({ profile, apartment }) {
     fetchBookings();
     fetchNotices();
     fetchVotes();
+    fetchFlatMembers();
+  }
+
+  async function fetchFlatMembers() {
+    if (!profile.apartment_id || !profile.flat_number) return;
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('apartment_id', profile.apartment_id)
+      .eq('flat_number', profile.flat_number)
+      .order('created_at', { ascending: true });
+    if (data) setFlatMembers(data);
+  }
+
+  async function approveFlatMember(memberId) {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ is_approved: true })
+      .eq('id', memberId)
+      .eq('flat_number', profile.flat_number);
+    if (error) alert('Could not approve member: ' + error.message);
+    else fetchFlatMembers();
+  }
+
+  async function removeFlatMember(member) {
+    const confirmed = window.confirm(
+      `Remove ${member.full_name} (${formatResidentTypeLabel(member.resident_type)}) from Flat ${profile.flat_number}?`
+    );
+    if (!confirmed) return;
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ is_approved: false })
+      .eq('id', member.id)
+      .eq('flat_number', profile.flat_number);
+    if (error) alert('Could not revoke access: ' + error.message);
+    else fetchFlatMembers();
   }
 
   async function fetchVisitors() {
@@ -1035,17 +1153,66 @@ function ResidentDashboard({ profile, apartment }) {
     fetchVisitors();
   }
 
-  async function payInvoice(id) {
-    const mockPaymentId = 'pay_' + Math.random().toString(36).substring(2, 11);
-    await supabase
+  function openUpiPaymentModal(invoice) {
+    setActivePayInvoice(invoice);
+    setUtrInput(invoice.razorpay_payment_id || '');
+    setCopiedUpi(false);
+  }
+
+  function handleOpenUpiApp(invoice) {
+    if (!apartment?.upi_id) {
+      alert('Your RWA Admin has not configured the Society UPI ID yet. Please ask your Admin to add the UPI ID in Settings.');
+      return;
+    }
+    const total = Number(invoice.base_amount) + Number(invoice.late_fee || 0);
+    const upiUrl = buildUpiPaymentUrl({
+      upiId: apartment.upi_id,
+      payeeName: apartment.name,
+      amount: total,
+      flatNumber: profile.flat_number,
+      billingMonth: invoice.billing_month,
+    });
+    launchUpiIntent(upiUrl);
+  }
+
+  async function handleCopyUpiId() {
+    if (!apartment?.upi_id) return;
+    try {
+      await navigator.clipboard.writeText(apartment.upi_id);
+      setCopiedUpi(true);
+      setTimeout(() => setCopiedUpi(false), 2000);
+    } catch {
+      alert('UPI ID: ' + apartment.upi_id);
+    }
+  }
+
+  async function submitUpiUtr(e) {
+    e.preventDefault();
+    const cleanedUtr = utrInput.trim().toUpperCase();
+    if (cleanedUtr.length < 6) {
+      alert('Please enter a valid UPI Transaction / UTR Reference Number (at least 6 characters).');
+      return;
+    }
+    setSubmittingUtr(true);
+
+    const { error } = await supabase
       .from('maintenance_invoices')
       .update({
-        status: 'Paid',
-        razorpay_payment_id: mockPaymentId,
+        status: 'Verification Pending',
+        razorpay_payment_id: cleanedUtr,
         paid_at: new Date().toISOString(),
       })
-      .eq('id', id);
-    fetchInvoices();
+      .eq('id', activePayInvoice.id);
+
+    if (error) {
+      alert('Failed to submit UTR: ' + error.message);
+    } else {
+      setActivePayInvoice(null);
+      setUtrInput('');
+      fetchInvoices();
+      alert('UTR submitted! Your RWA Admin will verify the bank credit and mark your bill Paid.');
+    }
+    setSubmittingUtr(false);
   }
 
   async function submitTicket(e) {
@@ -1096,10 +1263,14 @@ function ResidentDashboard({ profile, apartment }) {
 
   const pendingVisitors = visitors.filter((v) => v.status === 'Pending');
   const myFlatVoted = votes.some((v) => v.flat_number === profile.flat_number);
+  const canManageFlatMembers = Boolean(profile.is_flat_primary || profile.resident_type === 'owner');
+  const approvedFlatMembers = flatMembers.filter((m) => m.is_approved);
+  const pendingFlatMembers = flatMembers.filter((m) => !m.is_approved);
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap gap-2 bg-white p-2 rounded-2xl shadow-sm border border-indigo-100">
+    <div className="space-y-5 sm:space-y-6">
+      {/* 2x2 Responsive Grid on Mobile, Single Row on Desktop */}
+      <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 bg-white p-2 rounded-2xl shadow-sm border border-indigo-100">
         {[
           { id: 'gate', label: `Gate & Visitors (${pendingVisitors.length})`, icon: Shield },
           { id: 'payments', label: 'Maintenance Bills', icon: CreditCard },
@@ -1111,14 +1282,14 @@ function ResidentDashboard({ profile, apartment }) {
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition ${
+              className={`w-full sm:w-auto flex items-center justify-center sm:justify-start gap-1.5 sm:gap-2 px-2.5 sm:px-4 py-2.5 sm:py-2 rounded-xl text-xs sm:text-sm font-semibold text-center transition ${
                 tab === t.id
                   ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm'
-                  : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-700'
+                  : 'text-slate-600 bg-slate-50/70 sm:bg-transparent hover:bg-indigo-50 hover:text-indigo-700'
               }`}
             >
-              <Icon className="w-4 h-4" />
-              {t.label}
+              <Icon className="w-4 h-4 shrink-0" />
+              <span className="truncate">{t.label}</span>
             </button>
           );
         })}
@@ -1126,23 +1297,105 @@ function ResidentDashboard({ profile, apartment }) {
 
       {tab === 'gate' && (
         <div className="grid md:grid-cols-3 gap-6">
-          <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-indigo-600 h-fit">
-            <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-              <KeyRound className="w-4 h-4 text-indigo-600" /> Pre-Approve Visitor
-            </h3>
-            <form onSubmit={createPreApproval} className="space-y-3">
-              <input type="text" required placeholder="Visitor / Delivery Name" value={vName} onChange={(e) => setVName(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
-              <select value={vType} onChange={(e) => setVType(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white">
-                <option value="Guest">Guest</option>
-                <option value="Delivery">Delivery</option>
-                <option value="Cab">Cab</option>
-                <option value="Service">Service / Maid</option>
-              </select>
-              <input type="text" maxLength={4} placeholder="Vehicle Last 4 Digits (Optional)" value={vVehicle} onChange={(e) => setVVehicle(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
-              <button className="w-full py-2.5 bg-indigo-600 text-white text-sm font-semibold rounded-lg hover:bg-indigo-700 shadow-sm">
-                Generate 6-Digit Entry Pass
-              </button>
-            </form>
+          <div className="space-y-6 h-fit">
+            {/* Pre-Approve Visitor Card */}
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-indigo-600">
+              <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-indigo-600" /> Pre-Approve Visitor
+              </h3>
+              <form onSubmit={createPreApproval} className="space-y-3">
+                <input type="text" required placeholder="Visitor / Delivery Name" value={vName} onChange={(e) => setVName(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                <select value={vType} onChange={(e) => setVType(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white">
+                  <option value="Guest">Guest</option>
+                  <option value="Delivery">Delivery</option>
+                  <option value="Cab">Cab</option>
+                  <option value="Service">Service / Maid</option>
+                </select>
+                <input type="text" maxLength={4} placeholder="Vehicle Last 4 Digits (Optional)" value={vVehicle} onChange={(e) => setVVehicle(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                <button className="w-full py-2.5 bg-indigo-600 text-white text-sm font-semibold rounded-lg hover:bg-indigo-700 shadow-sm">
+                  Generate 6-Digit Entry Pass
+                </button>
+              </form>
+            </div>
+
+            {/* My Flat Members Approval & Management Card */}
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-violet-600 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="font-bold text-slate-800 flex items-center gap-2 text-sm">
+                  <Home className="w-4 h-4 text-violet-600" /> My Flat ({profile.flat_number}) Members
+                </h3>
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-violet-100 text-violet-800">
+                  {approvedFlatMembers.length} Active
+                </span>
+              </div>
+
+              {canManageFlatMembers && pendingFlatMembers.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
+                  <p className="text-[11px] font-bold uppercase text-amber-900">
+                    Pending Household Requests ({pendingFlatMembers.length})
+                  </p>
+                  {pendingFlatMembers.map((m) => (
+                    <div key={m.id} className="bg-white p-2.5 rounded-lg border border-amber-200 flex items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0">
+                        <p className="font-bold text-slate-900 truncate">{m.full_name}</p>
+                        <p className="text-[11px] text-slate-500">{formatResidentTypeLabel(m.resident_type)}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => approveFlatMember(m.id)}
+                        className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg"
+                      >
+                        <UserCheck className="w-3.5 h-3.5" />
+                        <span>Approve</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="divide-y divide-slate-100">
+                {approvedFlatMembers.map((m) => (
+                  <div key={m.id} className="py-2.5 flex items-center justify-between gap-2 text-xs">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900 truncate">
+                        {m.full_name} {m.id === profile.id ? <span className="text-slate-400 font-normal">(You)</span> : ''}
+                      </p>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span className={`px-2 py-0.2 rounded-full text-[10px] font-semibold ${
+                          m.resident_type === 'tenant'
+                            ? 'bg-amber-100 text-amber-800'
+                            : m.resident_type === 'family'
+                            ? 'bg-sky-100 text-sky-800'
+                            : 'bg-indigo-100 text-indigo-800'
+                        }`}>
+                          {formatResidentTypeLabel(m.resident_type)}
+                        </span>
+                        {m.is_flat_primary && (
+                          <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                            Primary
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {canManageFlatMembers && m.id !== profile.id && !m.is_flat_primary && (
+                      <button
+                        type="button"
+                        onClick={() => removeFlatMember(m)}
+                        title="Revoke Flat Access"
+                        className="shrink-0 inline-flex items-center gap-1 px-2 py-1 text-red-600 hover:bg-red-50 border border-red-200 rounded-lg font-medium"
+                      >
+                        <UserMinus className="w-3.5 h-3.5" />
+                        <span>Remove</span>
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-slate-500 pt-1">
+                Family members & tenants can sign up using Flat <strong>{profile.flat_number}</strong> to share gate alerts & bills.
+              </p>
+            </div>
           </div>
 
           <div className="md:col-span-2 space-y-4">
@@ -1163,10 +1416,10 @@ function ResidentDashboard({ profile, apartment }) {
                           <p className="text-xs text-slate-500">Vehicle: {v.vehicle_last4 || 'None'} • Waiting at gate</p>
                         </div>
                       </div>
-                      <div className="flex gap-2">
-                        <button onClick={() => updateVisitorStatus(v.id, 'Approved')} className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg">Approve</button>
-                        <button onClick={() => updateVisitorStatus(v.id, 'Leave-at-Gate')} className="px-3 py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg">Leave at Gate</button>
-                        <button onClick={() => updateVisitorStatus(v.id, 'Denied')} className="px-3 py-1.5 bg-red-600 text-white text-xs font-semibold rounded-lg">Deny</button>
+                      <div className="grid grid-cols-3 sm:flex gap-2 w-full sm:w-auto">
+                        <button onClick={() => updateVisitorStatus(v.id, 'Approved')} className="px-2.5 py-2 sm:py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg text-center">Approve</button>
+                        <button onClick={() => updateVisitorStatus(v.id, 'Leave-at-Gate')} className="px-2.5 py-2 sm:py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg text-center">Leave at Gate</button>
+                        <button onClick={() => updateVisitorStatus(v.id, 'Denied')} className="px-2.5 py-2 sm:py-1.5 bg-red-600 text-white text-xs font-semibold rounded-lg text-center">Deny</button>
                       </div>
                     </div>
                   ))}
@@ -1180,18 +1433,18 @@ function ResidentDashboard({ profile, apartment }) {
                 {visitors.length === 0 && <p className="text-sm text-slate-500 py-4">No visitor logs yet.</p>}
                 {visitors.map((v) => (
                   <div key={v.id} className="py-3 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
                       {v.visitor_photo && <img src={v.visitor_photo} alt={v.visitor_name} className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0" />}
-                      <div>
-                        <p className="font-medium text-sm text-slate-900">
+                      <div className="min-w-0">
+                        <p className="font-medium text-sm text-slate-900 truncate">
                           {v.visitor_name} <span className="text-xs text-slate-500">({v.visitor_type})</span>
                         </p>
-                        <p className="text-xs text-slate-500">
+                        <p className="text-xs text-slate-500 truncate">
                           {v.passcode ? `Passcode: ${v.passcode} • ` : ''}{new Date(v.entry_time).toLocaleString()}
                         </p>
                       </div>
                     </div>
-                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                    <span className={`shrink-0 text-xs font-semibold px-2.5 py-1 rounded-full ${
                       v.status === 'Approved' || v.status === 'Checked-In' ? 'bg-emerald-100 text-emerald-700' :
                       v.status === 'Denied' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-700'
                     }`}>
@@ -1206,14 +1459,24 @@ function ResidentDashboard({ profile, apartment }) {
       )}
 
       {tab === 'payments' && (
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-emerald-500 p-5">
-          <h3 className="font-bold text-slate-800 mb-4">Maintenance Invoices — Flat {profile.flat_number}</h3>
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-emerald-500 p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+            <div>
+              <h3 className="font-bold text-slate-800">Maintenance Invoices — Flat {profile.flat_number}</h3>
+              {apartment?.upi_id && (
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Society UPI ID: <span className="font-mono font-semibold text-indigo-700">{apartment.upi_id}</span> (Zero Gateway Fee)
+                </p>
+              )}
+            </div>
+          </div>
+
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
               <thead className="bg-slate-50 text-slate-600 border-b">
                 <tr>
                   <th className="p-3">Month</th>
-                  <th className="p-3">Base Amount</th>
+                  <th className="p-3">Base</th>
                   <th className="p-3">Late Fee</th>
                   <th className="p-3">Total</th>
                   <th className="p-3">Status</th>
@@ -1226,22 +1489,41 @@ function ResidentDashboard({ profile, apartment }) {
                   const total = Number(inv.base_amount) + Number(inv.late_fee || 0);
                   return (
                     <tr key={inv.id} className="hover:bg-slate-50/70">
-                      <td className="p-3 font-medium">{inv.billing_month}</td>
+                      <td className="p-3 font-medium whitespace-nowrap">{inv.billing_month}</td>
                       <td className="p-3">₹{inv.base_amount}</td>
                       <td className="p-3">₹{inv.late_fee || 0}</td>
                       <td className="p-3 font-bold text-slate-900">₹{total}</td>
-                      <td className="p-3">
-                        <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${inv.status === 'Paid' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}`}>
+                      <td className="p-3 whitespace-nowrap">
+                        <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                          inv.status === 'Paid'
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : inv.status === 'Verification Pending'
+                            ? 'bg-sky-100 text-sky-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}>
                           {inv.status}
                         </span>
                       </td>
-                      <td className="p-3">
-                        {inv.status !== 'Paid' ? (
-                          <button onClick={() => payInvoice(inv.id)} className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700">
-                            Pay ₹{total}
-                          </button>
+                      <td className="p-3 whitespace-nowrap">
+                        {inv.status === 'Paid' ? (
+                          <span className="text-xs text-slate-500 font-mono">UTR: {inv.razorpay_payment_id}</span>
+                        ) : inv.status === 'Verification Pending' ? (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-sky-700 font-mono">UTR: {inv.razorpay_payment_id}</span>
+                            <button
+                              onClick={() => openUpiPaymentModal(inv)}
+                              className="text-xs text-indigo-600 underline font-medium"
+                            >
+                              Edit
+                            </button>
+                          </div>
                         ) : (
-                          <span className="text-xs text-slate-500 font-mono">Ref: {inv.razorpay_payment_id}</span>
+                          <button
+                            onClick={() => openUpiPaymentModal(inv)}
+                            className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shadow-sm"
+                          >
+                            Pay ₹{total} via UPI
+                          </button>
                         )}
                       </td>
                     </tr>
@@ -1249,6 +1531,104 @@ function ResidentDashboard({ profile, apartment }) {
                 })}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Direct Society UPI Payment & UTR Submission Modal */}
+      {activePayInvoice && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 p-5 sm:p-6 space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="font-bold text-lg text-slate-900">Pay Society Maintenance</h3>
+                <p className="text-xs text-slate-500">
+                  Flat {profile.flat_number} • {activePayInvoice.billing_month}
+                </p>
+              </div>
+              <button
+                onClick={() => setActivePayInvoice(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 space-y-2">
+              <div className="flex justify-between items-center">
+                <span className="text-xs font-semibold text-emerald-900 uppercase">Amount Payable</span>
+                <span className="text-xl font-extrabold text-emerald-700">
+                  ₹{Number(activePayInvoice.base_amount) + Number(activePayInvoice.late_fee || 0)}
+                </span>
+              </div>
+
+              <div className="pt-2 border-t border-emerald-200/80 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-semibold text-emerald-800 uppercase">Society UPI ID</p>
+                  <p className="text-sm font-mono font-bold text-slate-900 truncate">
+                    {apartment?.upi_id || 'Not configured by Admin yet'}
+                  </p>
+                </div>
+                {apartment?.upi_id && (
+                  <button
+                    type="button"
+                    onClick={handleCopyUpiId}
+                    className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 bg-white border border-emerald-300 text-emerald-800 text-xs font-semibold rounded-lg hover:bg-emerald-100"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>{copiedUpi ? 'Copied!' : 'Copy'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={!apartment?.upi_id}
+              onClick={() => handleOpenUpiApp(activePayInvoice)}
+              className="w-full py-3 px-4 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 disabled:opacity-50 text-white font-semibold text-sm rounded-xl shadow-md flex items-center justify-center gap-2"
+            >
+              <ExternalLink className="w-4 h-4" />
+              <span>Open UPI App (GPay / PhonePe / Paytm)</span>
+            </button>
+
+            <form onSubmit={submitUpiUtr} className="pt-3 border-t border-slate-200 space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                  Step 2: Enter 12-Digit UPI UTR / Ref No.
+                </label>
+                <input
+                  type="text"
+                  required
+                  minLength={6}
+                  maxLength={30}
+                  placeholder="e.g. 433219847561"
+                  value={utrInput}
+                  onChange={(e) => setUtrInput(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  After completing payment in your UPI app, paste the UPI Reference / UTR number above for RWA verification.
+                </p>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActivePayInvoice(null)}
+                  className="flex-1 py-2.5 border border-slate-300 text-slate-700 text-xs sm:text-sm font-semibold rounded-xl hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingUtr}
+                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm"
+                >
+                  {submittingUtr ? 'Submitting...' : 'Submit UTR for Approval'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -1293,9 +1673,9 @@ function ResidentDashboard({ profile, apartment }) {
             <div className="pt-4 border-t space-y-2">
               <h4 className="text-xs font-bold uppercase text-slate-500">Upcoming Society Bookings</h4>
               {bookings.map((b) => (
-                <div key={b.id} className="p-2.5 bg-slate-50 rounded-xl text-xs flex justify-between">
+                <div key={b.id} className="p-2.5 bg-slate-50 rounded-xl text-xs flex justify-between gap-2">
                   <span className="font-semibold text-indigo-700">{b.amenity_name} ({b.flat_number})</span>
-                  <span className="text-slate-600">{b.booking_date} • {b.time_slot}</span>
+                  <span className="text-slate-600 text-right">{b.booking_date} • {b.time_slot}</span>
                 </div>
               ))}
             </div>
@@ -1309,12 +1689,22 @@ function ResidentDashboard({ profile, apartment }) {
             <h3 className="font-bold text-slate-800">RWA Notice Board</h3>
             {notices.length === 0 && <p className="text-sm text-slate-500">No notices published yet.</p>}
             {notices.map((n) => (
-              <div key={n.id} className="p-3.5 rounded-xl border border-sky-100 bg-sky-50/40">
-                <div className="flex justify-between items-center mb-1">
+              <div key={n.id} className="p-3.5 rounded-xl border border-sky-100 bg-sky-50/40 space-y-2">
+                <div className="flex justify-between items-center gap-2">
                   <h4 className="font-bold text-sm text-slate-900">{n.title}</h4>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-semibold">{n.priority}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-semibold shrink-0">{n.priority}</span>
                 </div>
                 <p className="text-xs text-slate-600">{n.body}</p>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => shareNoticeToWhatsApp(apartment?.name, n.title, n.body)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg"
+                  >
+                    <Share2 className="w-3 h-3" />
+                    <span>Share on WhatsApp</span>
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -1346,7 +1736,7 @@ function ResidentDashboard({ profile, apartment }) {
   );
 }
 
-/* ==================== 4. SECURITY GUARD DASHBOARD (SCOPED TO APARTMENT) ==================== */
+/* ==================== 4. SECURITY GUARD DASHBOARD (NATIVE CAPACITOR CAMERA) ==================== */
 function SecurityDashboard({ profile }) {
   const [visitors, setVisitors] = useState([]);
   const [otpInput, setOtpInput] = useState('');
@@ -1376,14 +1766,20 @@ function SecurityDashboard({ profile }) {
     if (data) setVisitors(data);
   }
 
-  async function handlePhotoCapture(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  async function handleTakePhoto() {
     try {
-      const compressedBase64 = await compressImage(file);
-      setPhotoData(compressedBase64);
-    } catch {
-      alert('Could not process photo. Please try again.');
+      const image = await CapCamera.getPhoto({
+        quality: 70,
+        width: 480,
+        allowEditing: false,
+        resultType: CameraResultType.DataUrl,
+        source: CameraSource.Camera,
+      });
+      if (image.dataUrl) {
+        setPhotoData(image.dataUrl);
+      }
+    } catch (err) {
+      console.warn('Camera cancelled or unavailable:', err);
     }
   }
 
@@ -1432,7 +1828,7 @@ function SecurityDashboard({ profile }) {
   }
 
   async function changeStatus(id, status) {
-    const payload: any = { status };
+    const payload = { status };
     if (status === 'Checked-Out') payload.exit_time = new Date().toISOString();
     await supabase.from('visitor_logs').update(payload).eq('id', id);
     fetchVisitors();
@@ -1470,14 +1866,19 @@ function SecurityDashboard({ profile }) {
               {photoData ? (
                 <div className="relative w-full">
                   <img src={photoData} alt="Visitor preview" className="w-full h-36 object-cover rounded-xl border border-slate-300" />
-                  <button type="button" onClick={() => setPhotoData(null)} className="absolute top-2 right-2 bg-red-600 text-white text-xs px-2.5 py-1 rounded-lg shadow">Retake</button>
+                  <button type="button" onClick={() => setPhotoData(null)} className="absolute top-2 right-2 bg-red-600 text-white text-xs px-2.5 py-1 rounded-lg shadow">
+                    Retake
+                  </button>
                 </div>
               ) : (
-                <label className="flex items-center justify-center gap-2 w-full py-2.5 px-3 border-2 border-dashed border-indigo-200 bg-indigo-50/40 rounded-xl text-sm font-medium text-indigo-700 hover:border-indigo-500 cursor-pointer transition">
+                <button
+                  type="button"
+                  onClick={handleTakePhoto}
+                  className="flex items-center justify-center gap-2 w-full py-2.5 px-3 border-2 border-dashed border-indigo-200 bg-indigo-50/40 rounded-xl text-sm font-medium text-indigo-700 hover:border-indigo-500 transition"
+                >
                   <Camera className="w-4 h-4" />
                   <span>Click Visitor Photo</span>
-                  <input type="file" accept="image/*" capture="environment" onChange={handlePhotoCapture} className="hidden" />
-                </label>
+                </button>
               )}
             </div>
 
@@ -1519,7 +1920,7 @@ function SecurityDashboard({ profile }) {
   );
 }
 
-/* ==================== 5. ADMIN DASHBOARD (SCOPED TO APARTMENT) ==================== */
+/* ==================== 5. ADMIN DASHBOARD (UPI VERIFICATION + RESIDENT TYPE TAGS) ==================== */
 function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
   const amenitiesList = apartment?.amenities?.length ? apartment.amenities : DEFAULT_AMENITIES;
   const slotsList = apartment?.amenity_slots?.length ? apartment.amenity_slots : DEFAULT_SLOTS;
@@ -1528,6 +1929,7 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
   const [users, setUsers] = useState([]);
   const [invoices, setInvoices] = useState([]);
   const [tickets, setTickets] = useState([]);
+  const [notices, setNotices] = useState([]);
 
   const [billingMode, setBillingMode] = useState('bulk');
   const [invFlat, setInvFlat] = useState('');
@@ -1539,12 +1941,14 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
   const [nTitle, setNTitle] = useState('');
   const [nBody, setNBody] = useState('');
 
+  const [editUpiId, setEditUpiId] = useState(apartment?.upi_id || '');
   const [editAmenities, setEditAmenities] = useState(amenitiesList.join(', '));
   const [editSlots, setEditSlots] = useState(slotsList.join(', '));
   const [editCategories, setEditCategories] = useState(categoriesList.join(', '));
   const [savingOptions, setSavingOptions] = useState(false);
 
   useEffect(() => {
+    setEditUpiId(apartment?.upi_id || '');
     setEditAmenities(amenitiesList.join(', '));
     setEditSlots(slotsList.join(', '));
     setEditCategories(categoriesList.join(', '));
@@ -1555,6 +1959,7 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
       fetchUsers();
       fetchInvoices();
       fetchTickets();
+      fetchNotices();
     }
   }, [profile?.apartment_id]);
 
@@ -1585,9 +1990,46 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
     if (data) setTickets(data);
   }
 
-  async function approveUser(id) {
-    await supabase.from('profiles').update({ is_approved: true }).eq('id', id);
+  async function fetchNotices() {
+    const { data } = await supabase
+      .from('notices')
+      .select('*')
+      .eq('apartment_id', profile.apartment_id)
+      .order('created_at', { ascending: false });
+    if (data) setNotices(data);
+  }
+
+  async function approveUser(userToApprove) {
+    let promotePrimary = userToApprove.is_flat_primary;
+    if (userToApprove.role === 'resident' && userToApprove.flat_number && userToApprove.resident_type === 'owner') {
+      const hasApprovedPrimary = users.some(
+        (u) =>
+          u.id !== userToApprove.id &&
+          u.flat_number === userToApprove.flat_number &&
+          u.is_approved &&
+          u.is_flat_primary
+      );
+      if (!hasApprovedPrimary) promotePrimary = true;
+    }
+
+    await supabase
+      .from('profiles')
+      .update({ is_approved: true, is_flat_primary: promotePrimary })
+      .eq('id', userToApprove.id);
     fetchUsers();
+  }
+
+  async function verifyUpiPayment(invoiceId) {
+    const { error } = await supabase
+      .from('maintenance_invoices')
+      .update({
+        status: 'Paid',
+        paid_at: new Date().toISOString(),
+      })
+      .eq('id', invoiceId);
+
+    if (error) alert('Error verifying payment: ' + error.message);
+    else fetchInvoices();
   }
 
   async function savePortalOptions(e) {
@@ -1607,16 +2049,17 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
     const { error } = await supabase
       .from('apartments')
       .update({
+        upi_id: editUpiId.trim() || null,
         amenities: parsedAmenities,
         amenity_slots: parsedSlots,
         helpdesk_categories: parsedCategories,
       })
       .eq('id', profile.apartment_id);
 
-    if (error) alert('Failed to update options: ' + error.message);
+    if (error) alert('Failed to update settings: ' + error.message);
     else {
       await onApartmentUpdated();
-      alert('Amenity, Full-Day Slot, and Helpdesk options updated for your apartment!');
+      alert('Society UPI ID, Amenities, Slots, and Helpdesk options updated!');
     }
     setSavingOptions(false);
   }
@@ -1681,14 +2124,19 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
 
   async function publishNotice(e) {
     e.preventDefault();
-    await supabase.from('notices').insert({
+    const { error } = await supabase.from('notices').insert({
       apartment_id: profile.apartment_id,
       title: nTitle,
       body: nBody,
       priority: 'Important',
     });
+    if (error) {
+      alert('Failed to publish notice: ' + error.message);
+      return;
+    }
     setNTitle('');
     setNBody('');
+    fetchNotices();
     alert('Notice published to all residents in your apartment!');
   }
 
@@ -1698,9 +2146,39 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
   }
 
   const pendingUsers = users.filter((u) => !u.is_approved);
+  const pendingUpiVerifications = invoices.filter((i) => i.status === 'Verification Pending');
 
   return (
     <div className="space-y-6">
+      {/* UPI Payment Verification Queue */}
+      {pendingUpiVerifications.length > 0 && (
+        <div className="bg-gradient-to-r from-sky-50 to-indigo-50 p-5 rounded-2xl shadow-sm border border-sky-300">
+          <h3 className="font-bold text-sky-950 mb-3 flex items-center gap-2">
+            <CheckCircle2 className="w-5 h-5 text-sky-600" /> UPI Payments Awaiting Verification ({pendingUpiVerifications.length})
+          </h3>
+          <div className="space-y-2.5">
+            {pendingUpiVerifications.map((inv) => (
+              <div key={inv.id} className="bg-white p-3.5 rounded-xl border border-sky-200 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="font-bold text-sm text-slate-900">
+                    Flat {inv.flat_number} • {inv.billing_month} • ₹{Number(inv.base_amount) + Number(inv.late_fee || 0)}
+                  </p>
+                  <p className="text-xs text-slate-600 font-mono">
+                    Submitted UPI UTR: <span className="font-bold text-indigo-700">{inv.razorpay_payment_id}</span>
+                  </p>
+                </div>
+                <button
+                  onClick={() => verifyUpiPayment(inv.id)}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-sm"
+                >
+                  Verify & Mark Paid
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-indigo-600">
         <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
           <Users className="w-4 h-4 text-indigo-600" /> User Verification Queue ({pendingUsers.length} Pending)
@@ -1710,14 +2188,18 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
         ) : (
           <div className="divide-y">
             {pendingUsers.map((u) => (
-              <div key={u.id} className="py-3 flex items-center justify-between">
+              <div key={u.id} className="py-3 flex items-center justify-between gap-2">
                 <div>
                   <p className="font-semibold text-sm text-slate-900">{u.full_name}</p>
                   <p className="text-xs text-slate-500 capitalize">
-                    Role: <span className="font-medium text-indigo-600">{u.role}</span> {u.flat_number ? `• Flat ${u.flat_number}` : ''}
+                    Role:{' '}
+                    <span className="font-medium text-indigo-600">
+                      {u.role === 'resident' ? formatResidentTypeLabel(u.resident_type) : u.role}
+                    </span>{' '}
+                    {u.flat_number ? `• Flat ${u.flat_number}` : ''}
                   </p>
                 </div>
-                <button onClick={() => approveUser(u.id)} className="px-3.5 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700">
+                <button onClick={() => approveUser(u)} className="px-3.5 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shrink-0">
                   Approve Account
                 </button>
               </div>
@@ -1741,6 +2223,12 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
               </button>
             </div>
           </div>
+
+          {!apartment?.upi_id && (
+            <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+              Tip: Set your <strong>Society UPI ID</strong> in the settings box below so residents can pay bills directly via GPay / PhonePe / Paytm.
+            </div>
+          )}
 
           <form onSubmit={handleGenerateInvoice} className="space-y-3">
             {billingMode === 'bulk' ? (
@@ -1772,22 +2260,95 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
 
           <div className="pt-3 border-t space-y-2 max-h-52 overflow-y-auto">
             {invoices.map((i) => (
-              <div key={i.id} className="text-xs flex justify-between items-center p-2.5 bg-slate-50 rounded-xl border border-slate-100">
-                <span><strong className="text-slate-900">Flat {i.flat_number}</strong> • {i.billing_month} (₹{i.base_amount})</span>
-                <span className={`px-2 py-0.5 rounded-full font-bold ${i.status === 'Paid' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{i.status}</span>
+              <div key={i.id} className="text-xs flex justify-between items-center p-2.5 bg-slate-50 rounded-xl border border-slate-100 gap-2">
+                <div>
+                  <span><strong className="text-slate-900">Flat {i.flat_number}</strong> • {i.billing_month} (₹{i.base_amount})</span>
+                  {i.razorpay_payment_id && <p className="text-[11px] font-mono text-slate-500">UTR: {i.razorpay_payment_id}</p>}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {i.status === 'Verification Pending' && (
+                    <button
+                      onClick={() => verifyUpiPayment(i.id)}
+                      className="px-2 py-0.5 bg-emerald-600 text-white rounded font-semibold"
+                    >
+                      Approve
+                    </button>
+                  )}
+                  <span className={`px-2 py-0.5 rounded-full font-bold ${
+                    i.status === 'Paid'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : i.status === 'Verification Pending'
+                      ? 'bg-sky-100 text-sky-800'
+                      : 'bg-amber-100 text-amber-700'
+                  }`}>
+                    {i.status}
+                  </span>
+                </div>
               </div>
             ))}
           </div>
         </div>
 
         <div className="space-y-6">
-          <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-sky-500">
-            <h3 className="font-bold text-slate-800 mb-3">Publish Society Notice</h3>
+          <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-sky-500 space-y-4">
+            <h3 className="font-bold text-slate-800">Publish Society Notice</h3>
             <form onSubmit={publishNotice} className="space-y-3">
-              <input type="text" required placeholder="Notice Title" value={nTitle} onChange={(e) => setNTitle(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm" />
-              <textarea required rows={2} placeholder="Notice details..." value={nBody} onChange={(e) => setNBody(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm" />
-              <button className="px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold rounded-lg">Publish Notice</button>
+              <input
+                type="text"
+                required
+                placeholder="Notice Title"
+                value={nTitle}
+                onChange={(e) => setNTitle(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              />
+              <textarea
+                required
+                rows={2}
+                placeholder="Notice details..."
+                value={nBody}
+                onChange={(e) => setNBody(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="submit"
+                  className="py-2 px-3 bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-semibold rounded-lg shadow-sm"
+                >
+                  Publish Notice
+                </button>
+                <button
+                  type="button"
+                  disabled={!nTitle.trim() || !nBody.trim()}
+                  onClick={() => shareNoticeToWhatsApp(apartment?.name, nTitle, nBody)}
+                  className="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs sm:text-sm font-semibold rounded-lg shadow-sm inline-flex items-center justify-center gap-1.5"
+                >
+                  <Share2 className="w-4 h-4 shrink-0" />
+                  <span>Post to WhatsApp</span>
+                </button>
+              </div>
             </form>
+
+            {notices.length > 0 && (
+              <div className="pt-3 border-t space-y-2 max-h-48 overflow-y-auto">
+                <p className="text-[11px] font-bold uppercase text-slate-500">Published Notices</p>
+                {notices.map((n) => (
+                  <div key={n.id} className="p-2.5 bg-slate-50 rounded-xl border border-slate-100 flex items-start justify-between gap-2 text-xs">
+                    <div className="min-w-0">
+                      <p className="font-bold text-slate-900 truncate">{n.title}</p>
+                      <p className="text-slate-600 line-clamp-2">{n.body}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => shareNoticeToWhatsApp(apartment?.name, n.title, n.body)}
+                      className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg"
+                    >
+                      <Share2 className="w-3 h-3" />
+                      <span>WhatsApp</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-amber-500">
@@ -1795,15 +2356,15 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
             <div className="space-y-2">
               {tickets.length === 0 && <p className="text-xs text-slate-500">No open helpdesk tickets.</p>}
               {tickets.map((t) => (
-                <div key={t.id} className="p-2.5 bg-slate-50 rounded-xl flex justify-between items-center text-xs border border-slate-100">
+                <div key={t.id} className="p-2.5 bg-slate-50 rounded-xl flex justify-between items-center text-xs border border-slate-100 gap-2">
                   <div>
                     <p className="font-bold text-slate-900">Flat {t.flat_number} • {t.category}</p>
                     <p className="text-slate-600">{t.description}</p>
                   </div>
                   {t.status !== 'Resolved' ? (
-                    <button onClick={() => resolveTicket(t.id)} className="px-2.5 py-1 bg-emerald-600 text-white rounded-lg font-medium">Mark Resolved</button>
+                    <button onClick={() => resolveTicket(t.id)} className="px-2.5 py-1 bg-emerald-600 text-white rounded-lg font-medium shrink-0">Mark Resolved</button>
                   ) : (
-                    <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full">Resolved</span>
+                    <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full shrink-0">Resolved</span>
                   )}
                 </div>
               ))}
@@ -1814,10 +2375,20 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
 
       <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-violet-600">
         <h3 className="font-bold text-slate-800 mb-1 flex items-center gap-2">
-          <Settings className="w-4 h-4 text-violet-600" /> Configure Amenity & Helpdesk Options
+          <Settings className="w-4 h-4 text-violet-600" /> Configure Society UPI, Amenity & Helpdesk Options
         </h3>
-        <p className="text-xs text-slate-500 mb-4">Edit comma-separated lists below. Changes apply immediately to your apartment's residents.</p>
-        <form onSubmit={savePortalOptions} className="grid md:grid-cols-3 gap-4">
+        <p className="text-xs text-slate-500 mb-4">Set your society's official UPI ID for zero-fee maintenance payments and customize dropdown options.</p>
+        <form onSubmit={savePortalOptions} className="grid md:grid-cols-2 gap-4">
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-slate-700 uppercase mb-1">Society RWA UPI ID (e.g. loyalmatesrwa@sbi)</label>
+            <input
+              type="text"
+              placeholder="Enter society UPI ID (e.g. apartmentname@okicici)"
+              value={editUpiId}
+              onChange={(e) => setEditUpiId(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-mono"
+            />
+          </div>
           <div>
             <label className="block text-xs font-semibold text-slate-700 uppercase mb-1">Community Amenities</label>
             <textarea rows={3} required value={editAmenities} onChange={(e) => setEditAmenities(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs" />
@@ -1826,13 +2397,13 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
             <label className="block text-xs font-semibold text-slate-700 uppercase mb-1">Booking Time Slots (Includes Full Day)</label>
             <textarea rows={3} required value={editSlots} onChange={(e) => setEditSlots(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs" />
           </div>
-          <div>
+          <div className="md:col-span-2">
             <label className="block text-xs font-semibold text-slate-700 uppercase mb-1">Helpdesk Complaint Categories</label>
-            <textarea rows={3} required value={editCategories} onChange={(e) => setEditCategories(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs" />
+            <textarea rows={2} required value={editCategories} onChange={(e) => setEditCategories(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs" />
           </div>
-          <div className="md:col-span-3 flex justify-end">
+          <div className="md:col-span-2 flex justify-end">
             <button disabled={savingOptions} className="px-5 py-2 bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold rounded-xl shadow-sm">
-              {savingOptions ? 'Saving Options...' : 'Save Amenity & Helpdesk Options'}
+              {savingOptions ? 'Saving Settings...' : 'Save UPI & Portal Settings'}
             </button>
           </div>
         </form>
