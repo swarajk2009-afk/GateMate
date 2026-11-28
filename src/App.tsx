@@ -4,7 +4,7 @@ import { supabase } from './supabaseClient';
 import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera';
 import {
   Shield, Users, CreditCard, Wrench, Bell, Clock, LogOut,
-  KeyRound, Plus, AlertTriangle, Building2, Pencil, Check, X, Camera, Layers, Settings, Crown, UserPlus, Share2, Copy, ExternalLink, CheckCircle2, Home, UserCheck, UserMinus
+  KeyRound, Plus, AlertTriangle, Building2, Pencil, Check, X, Camera, Layers, Settings, Crown, UserPlus, Share2, Copy, ExternalLink, CheckCircle2, Home, UserCheck, UserMinus, Volume2, VolumeX, Phone, MessageCircle
 } from 'lucide-react';
 
 const DEFAULT_AMENITIES = ['Clubhouse', 'Badminton Court', 'Gym', 'Guest Room'];
@@ -24,6 +24,37 @@ function shareNoticeToWhatsApp(apartmentName, title, body) {
     `_Sent via GateMate_`;
   const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(message)}`;
   window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function formatWhatsAppPhone(rawPhone) {
+  const digits = (rawPhone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length === 10) return `91${digits}`;
+  return digits;
+}
+
+function sendApprovalWhatsApp(apartmentName, user, isPrimaryOwner) {
+  const waPhone = formatWhatsAppPhone(user.phone_number);
+  if (!waPhone) return false;
+
+  const roleDesc =
+    user.role === 'resident'
+      ? `${formatResidentTypeLabel(user.resident_type)}${isPrimaryOwner ? ' (Primary)' : ''}`
+      : user.role.toUpperCase();
+
+  const flatLine = user.flat_number ? `*Flat Number:* ${user.flat_number}\n` : '';
+
+  const message =
+    `Hello *${user.full_name}*,\n\n` +
+    `Your *GateMate* account for *${apartmentName || 'our Society'}* has been *APPROVED* by the RWA Admin.\n\n` +
+    `${flatLine}` +
+    `*Account Type:* ${roleDesc}\n\n` +
+    `You can now log in to GateMate to approve visitors at the gate, view maintenance bills, and receive society notices.\n\n` +
+    `_Welcome to ${apartmentName || 'GateMate'}!_`;
+
+  const url = `https://api.whatsapp.com/send?phone=${waPhone}&text=${encodeURIComponent(message)}`;
+  window.open(url, '_blank', 'noopener,noreferrer');
+  return true;
 }
 
 function buildUpiPaymentUrl({ upiId, payeeName, amount, flatNumber, billingMonth }) {
@@ -46,6 +77,80 @@ function formatResidentTypeLabel(type) {
   if (type === 'family') return 'Family Member';
   if (type === 'tenant') return 'Tenant';
   return 'Owner';
+}
+
+function normalizePhoneInput(raw) {
+  return (raw || '').replace(/[^\d+]/g, '').trim();
+}
+
+function playDoorbellChime() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const now = ctx.currentTime;
+    const notes = [
+      { freq: 880, start: 0, duration: 0.45 },
+      { freq: 659.25, start: 0.35, duration: 0.75 },
+    ];
+
+    notes.forEach(({ freq, start, duration }) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + start);
+
+      gain.gain.setValueAtTime(0.001, now + start);
+      gain.gain.exponentialRampToValueAtTime(0.45, now + start + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + start + duration);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + start);
+      osc.stop(now + start + duration + 0.05);
+    });
+
+    if (navigator.vibrate) {
+      navigator.vibrate([400, 150, 500]);
+    }
+  } catch (err) {
+    console.warn('Audio ring blocked until first user tap:', err);
+  }
+}
+
+async function triggerAndroidGateNotification(visitor) {
+  try {
+    const LocalNotifications = window?.Capacitor?.Plugins?.LocalNotifications;
+    if (!LocalNotifications) return;
+
+    await LocalNotifications.requestPermissions();
+    await LocalNotifications.createChannel({
+      id: 'gatemate_doorbell',
+      name: 'GateMate Visitor Doorbell',
+      description: 'Urgent ring alerts when a visitor arrives at the main gate',
+      importance: 5,
+      visibility: 1,
+      sound: 'default',
+      vibration: true,
+    });
+
+    await LocalNotifications.schedule({
+      notifications: [
+        {
+          id: Math.floor(Date.now() % 1000000),
+          title: `Visitor at Gate: ${visitor.visitor_name}`,
+          body: `${visitor.visitor_type} waiting for Flat ${visitor.flat_number}. Tap to Approve or Deny.`,
+          channelId: 'gatemate_doorbell',
+          schedule: { at: new Date(Date.now() + 100) },
+          smallIcon: 'ic_launcher',
+        },
+      ],
+    });
+  } catch (err) {
+    console.warn('Native notification skipped in browser:', err);
+  }
 }
 
 export default function App() {
@@ -148,6 +253,7 @@ export default function App() {
         ? meta.flat_number.toUpperCase().trim()
         : null;
       const residentType = role === 'resident' ? (meta.resident_type || 'owner') : null;
+      const phoneNumber = meta.phone_number ? normalizePhoneInput(meta.phone_number) : null;
 
       let shouldBePrimary = false;
       if (role === 'resident' && residentType === 'owner' && normalizedFlat && meta.apartment_id) {
@@ -172,6 +278,7 @@ export default function App() {
           flat_number: normalizedFlat,
           apartment_id: meta.apartment_id || null,
           resident_type: residentType,
+          phone_number: phoneNumber,
           is_flat_primary: shouldBePrimary,
           is_approved: role === 'dev',
         })
@@ -377,6 +484,7 @@ export default function App() {
           <ResidentDashboard
             profile={profile}
             apartment={apartment}
+            onProfileUpdated={() => fetchProfile(session.user)}
           />
         )}
         {profile.role === 'security' && (
@@ -394,12 +502,13 @@ export default function App() {
   );
 }
 
-/* ==================== 1. AUTH SCREEN (WITH RESIDENT TYPE SELECTOR) ==================== */
+/* ==================== 1. AUTH SCREEN (WITH PHONE NUMBER & RESIDENT TYPE) ==================== */
 function AuthScreen({ apartmentsList, refreshApartments }) {
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
+  const [phoneNumber, setPhoneNumber] = useState('');
   const [role, setRole] = useState('resident');
   const [residentType, setResidentType] = useState('owner');
   const [apartmentId, setApartmentId] = useState('');
@@ -430,6 +539,13 @@ function AuthScreen({ apartmentsList, refreshApartments }) {
         return;
       }
 
+      const cleanedPhone = normalizePhoneInput(phoneNumber);
+      if (loginMode === 'standard' && cleanedPhone.length < 10) {
+        setMessage('Please enter a valid 10-digit mobile number.');
+        setLoading(false);
+        return;
+      }
+
       const { error } = await supabase.auth.signUp({
         email,
         password,
@@ -437,6 +553,7 @@ function AuthScreen({ apartmentsList, refreshApartments }) {
           data: {
             full_name: fullName,
             role,
+            phone_number: cleanedPhone || null,
             apartment_id: role === 'dev' ? null : apartmentId,
             flat_number: role === 'resident' ? flatNumber.toUpperCase().trim() : null,
             resident_type: role === 'resident' ? residentType : null,
@@ -510,16 +627,30 @@ function AuthScreen({ apartmentsList, refreshApartments }) {
         <form onSubmit={handleSubmit} className="space-y-3.5">
           {isSignUp && (
             <>
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Full Name</label>
-                <input
-                  type="text"
-                  required
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  placeholder={loginMode === 'dev' ? 'e.g. Dev Super Admin' : 'e.g. Swaraj Kumar'}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Full Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder={loginMode === 'dev' ? 'e.g. Dev Admin' : 'e.g. Swaraj Kumar'}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Mobile (WhatsApp)</label>
+                  <input
+                    type="tel"
+                    required={loginMode === 'standard'}
+                    maxLength={15}
+                    value={phoneNumber}
+                    onChange={(e) => setPhoneNumber(e.target.value)}
+                    placeholder="e.g. 9876543210"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
               </div>
 
               {loginMode === 'standard' && (
@@ -650,6 +781,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
   const [selectedAptForAdmin, setSelectedAptForAdmin] = useState('');
 
   const [newAdminName, setNewAdminName] = useState('');
+  const [newAdminPhone, setNewAdminPhone] = useState('');
   const [newAdminEmail, setNewAdminEmail] = useState('');
   const [newAdminPass, setNewAdminPass] = useState('');
   const [creatingAdmin, setCreatingAdmin] = useState(false);
@@ -709,6 +841,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
 
     const { data: currentSessionData } = await supabase.auth.getSession();
     const devSession = currentSessionData?.session;
+    const cleanedPhone = normalizePhoneInput(newAdminPhone);
 
     const { data: signUpData, error } = await supabase.auth.signUp({
       email: newAdminEmail.trim(),
@@ -716,6 +849,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
       options: {
         data: {
           full_name: newAdminName.trim(),
+          phone_number: cleanedPhone || null,
           role: 'admin',
           apartment_id: selectedAptForAdmin,
         },
@@ -728,6 +862,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
       await supabase.from('profiles').upsert({
         id: signUpData.user.id,
         full_name: newAdminName.trim(),
+        phone_number: cleanedPhone || null,
         role: 'admin',
         apartment_id: selectedAptForAdmin,
         is_approved: true,
@@ -742,6 +877,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
 
       alert(`RWA Admin "${newAdminName}" created and approved!`);
       setNewAdminName('');
+      setNewAdminPhone('');
       setNewAdminEmail('');
       setNewAdminPass('');
       fetchAllProfiles();
@@ -765,8 +901,11 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
     }
   }
 
-  async function approveAnyUser(userId) {
-    await supabase.from('profiles').update({ is_approved: true }).eq('id', userId);
+  async function approveAnyUser(user) {
+    await supabase.from('profiles').update({ is_approved: true }).eq('id', user.id);
+    if (user.phone_number) {
+      sendApprovalWhatsApp(getAptName(user.apartment_id), user, user.is_flat_primary);
+    }
     fetchAllProfiles();
   }
 
@@ -852,16 +991,28 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Admin Full Name</label>
-              <input
-                type="text"
-                required
-                placeholder="e.g. Swaraj Admin"
-                value={newAdminName}
-                onChange={(e) => setNewAdminName(e.target.value)}
-                className="w-full px-3 py-2 border rounded-lg text-sm"
-              />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Admin Full Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Swaraj Admin"
+                  value={newAdminName}
+                  onChange={(e) => setNewAdminName(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Admin Mobile</label>
+                <input
+                  type="tel"
+                  placeholder="e.g. 9876543210"
+                  value={newAdminPhone}
+                  onChange={(e) => setNewAdminPhone(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -933,6 +1084,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
             <thead className="bg-slate-50 text-slate-600 border-b">
               <tr>
                 <th className="p-2.5">Name</th>
+                <th className="p-2.5">Phone</th>
                 <th className="p-2.5">Role</th>
                 <th className="p-2.5">Apartment</th>
                 <th className="p-2.5">Flat</th>
@@ -944,6 +1096,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
               {allProfiles.map((u) => (
                 <tr key={u.id}>
                   <td className="p-2.5 font-semibold text-slate-900">{u.full_name}</td>
+                  <td className="p-2.5 font-mono">{u.phone_number || '—'}</td>
                   <td className="p-2.5 capitalize">
                     {u.role === 'resident' ? formatResidentTypeLabel(u.resident_type) : u.role}
                   </td>
@@ -957,7 +1110,7 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
                   <td className="p-2.5 flex gap-2">
                     {!u.is_approved && (
                       <button
-                        onClick={() => approveAnyUser(u.id)}
+                        onClick={() => approveAnyUser(u)}
                         className="px-2.5 py-1 bg-emerald-600 text-white rounded font-semibold"
                       >
                         Approve
@@ -982,8 +1135,8 @@ function SuperDevDashboard({ apartmentsList, refreshApartments }) {
   );
 }
 
-/* ==================== 3. RESIDENT DASHBOARD (MULTI-USER FLAT MANAGEMENT + UPI) ==================== */
-function ResidentDashboard({ profile, apartment }) {
+/* ==================== 3. RESIDENT DASHBOARD (DYNAMIC POLLS + PHONE NUMBERS + DOORBELL + UPI) ==================== */
+function ResidentDashboard({ profile, apartment, onProfileUpdated }) {
   const amenitiesList = apartment?.amenities?.length ? apartment.amenities : DEFAULT_AMENITIES;
   const slotsList = apartment?.amenity_slots?.length ? apartment.amenity_slots : DEFAULT_SLOTS;
   const categoriesList = apartment?.helpdesk_categories?.length ? apartment.helpdesk_categories : DEFAULT_CATEGORIES;
@@ -994,8 +1147,15 @@ function ResidentDashboard({ profile, apartment }) {
   const [tickets, setTickets] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [notices, setNotices] = useState([]);
+  const [activePoll, setActivePoll] = useState(null);
   const [votes, setVotes] = useState([]);
   const [flatMembers, setFlatMembers] = useState([]);
+  const [isRingingMuted, setIsRingingMuted] = useState(false);
+
+  // Own Phone Number Inline Edit
+  const [editingMyPhone, setEditingMyPhone] = useState(false);
+  const [myPhoneDraft, setMyPhoneDraft] = useState(profile.phone_number || '');
+  const [savingMyPhone, setSavingMyPhone] = useState(false);
 
   // UPI Payment Modal State
   const [activePayInvoice, setActivePayInvoice] = useState(null);
@@ -1015,17 +1175,50 @@ function ResidentDashboard({ profile, apartment }) {
   const [bSlot, setBSlot] = useState(slotsList[0]);
 
   useEffect(() => {
+    setMyPhoneDraft(profile.phone_number || '');
+  }, [profile.phone_number]);
+
+  useEffect(() => {
     loadAllData();
     const channel = supabase
       .channel(`resident-gate-${profile.apartment_id}-${profile.flat_number}`)
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'visitor_logs', filter: `flat_number=eq.${profile.flat_number}` },
+        { event: 'INSERT', schema: 'public', table: 'visitor_logs', filter: `flat_number=eq.${profile.flat_number}` },
+        (payload) => {
+          fetchVisitors();
+          if (payload.new?.status === 'Pending') {
+            setIsRingingMuted(false);
+            playDoorbellChime();
+            triggerAndroidGateNotification(payload.new);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'visitor_logs', filter: `flat_number=eq.${profile.flat_number}` },
         () => fetchVisitors()
       )
       .subscribe();
     return () => supabase.removeChannel(channel);
   }, [profile.flat_number, profile.apartment_id]);
+
+  const pendingVisitors = visitors.filter((v) => v.status === 'Pending');
+
+  useEffect(() => {
+    if (pendingVisitors.length === 0) {
+      setIsRingingMuted(false);
+      return;
+    }
+    if (isRingingMuted) return;
+
+    playDoorbellChime();
+    const ringInterval = setInterval(() => {
+      playDoorbellChime();
+    }, 2800);
+
+    return () => clearInterval(ringInterval);
+  }, [pendingVisitors.length, isRingingMuted]);
 
   async function loadAllData() {
     fetchVisitors();
@@ -1033,7 +1226,7 @@ function ResidentDashboard({ profile, apartment }) {
     fetchTickets();
     fetchBookings();
     fetchNotices();
-    fetchVotes();
+    fetchActivePollAndVotes();
     fetchFlatMembers();
   }
 
@@ -1048,14 +1241,42 @@ function ResidentDashboard({ profile, apartment }) {
     if (data) setFlatMembers(data);
   }
 
-  async function approveFlatMember(memberId) {
+  async function saveMyPhoneNumber(e) {
+    e.preventDefault();
+    const cleaned = normalizePhoneInput(myPhoneDraft);
+    if (cleaned.length < 10) {
+      alert('Please enter a valid 10-digit mobile number.');
+      return;
+    }
+    setSavingMyPhone(true);
+    const { error } = await supabase
+      .from('profiles')
+      .update({ phone_number: cleaned })
+      .eq('id', profile.id);
+
+    if (error) {
+      alert('Could not save phone number: ' + error.message);
+    } else {
+      setEditingMyPhone(false);
+      await fetchFlatMembers();
+      if (onProfileUpdated) onProfileUpdated();
+    }
+    setSavingMyPhone(false);
+  }
+
+  async function approveFlatMember(member) {
     const { error } = await supabase
       .from('profiles')
       .update({ is_approved: true })
-      .eq('id', memberId)
+      .eq('id', member.id)
       .eq('flat_number', profile.flat_number);
     if (error) alert('Could not approve member: ' + error.message);
-    else fetchFlatMembers();
+    else {
+      if (member.phone_number) {
+        sendApprovalWhatsApp(apartment?.name, member, false);
+      }
+      fetchFlatMembers();
+    }
   }
 
   async function removeFlatMember(member) {
@@ -1121,13 +1342,29 @@ function ResidentDashboard({ profile, apartment }) {
     if (data) setNotices(data);
   }
 
-  async function fetchVotes() {
-    const { data } = await supabase
-      .from('poll_votes')
+  async function fetchActivePollAndVotes() {
+    if (!profile.apartment_id) return;
+    const { data: pollData } = await supabase
+      .from('polls')
       .select('*')
       .eq('apartment_id', profile.apartment_id)
-      .eq('poll_id', 'solar-rooftop-2026');
-    if (data) setVotes(data);
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    setActivePoll(pollData || null);
+
+    if (pollData?.id) {
+      const { data: voteData } = await supabase
+        .from('poll_votes')
+        .select('*')
+        .eq('apartment_id', profile.apartment_id)
+        .eq('poll_id', pollData.id);
+      if (voteData) setVotes(voteData);
+    } else {
+      setVotes([]);
+    }
   }
 
   async function updateVisitorStatus(id, status) {
@@ -1251,17 +1488,17 @@ function ResidentDashboard({ profile, apartment }) {
   }
 
   async function castVote(option) {
+    if (!activePoll?.id) return;
     const { error } = await supabase.from('poll_votes').insert({
       apartment_id: profile.apartment_id,
-      poll_id: 'solar-rooftop-2026',
+      poll_id: activePoll.id,
       flat_number: profile.flat_number,
       option_selected: option,
     });
     if (error) alert('Your flat has already voted in this poll.');
-    else fetchVotes();
+    else fetchActivePollAndVotes();
   }
 
-  const pendingVisitors = visitors.filter((v) => v.status === 'Pending');
   const myFlatVoted = votes.some((v) => v.flat_number === profile.flat_number);
   const canManageFlatMembers = Boolean(profile.is_flat_primary || profile.resident_type === 'owner');
   const approvedFlatMembers = flatMembers.filter((m) => m.is_approved);
@@ -1300,9 +1537,20 @@ function ResidentDashboard({ profile, apartment }) {
           <div className="space-y-6 h-fit">
             {/* Pre-Approve Visitor Card */}
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-indigo-600">
-              <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-indigo-600" /> Pre-Approve Visitor
-              </h3>
+              <div className="flex items-center justify-between gap-2 mb-4">
+                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-indigo-600" /> Pre-Approve Visitor
+                </h3>
+                <button
+                  type="button"
+                  onClick={playDoorbellChime}
+                  title="Test Doorbell Ring & Unlock Audio"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold rounded-lg border border-indigo-200"
+                >
+                  <Volume2 className="w-3.5 h-3.5" />
+                  <span>Test Ring</span>
+                </button>
+              </div>
               <form onSubmit={createPreApproval} className="space-y-3">
                 <input type="text" required placeholder="Visitor / Delivery Name" value={vName} onChange={(e) => setVName(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
                 <select value={vType} onChange={(e) => setVType(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white">
@@ -1318,7 +1566,7 @@ function ResidentDashboard({ profile, apartment }) {
               </form>
             </div>
 
-            {/* My Flat Members Approval & Management Card */}
+            {/* My Flat Members Approval & Management Card (With Phone Numbers) */}
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-violet-600 space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <h3 className="font-bold text-slate-800 flex items-center gap-2 text-sm">
@@ -1329,6 +1577,47 @@ function ResidentDashboard({ profile, apartment }) {
                 </span>
               </div>
 
+              {!profile.phone_number && !editingMyPhone && (
+                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-amber-900">Add your mobile number so Security & Admin can reach you on WhatsApp.</span>
+                  <button
+                    type="button"
+                    onClick={() => setEditingMyPhone(true)}
+                    className="shrink-0 px-2.5 py-1 bg-amber-600 text-white font-semibold rounded-lg"
+                  >
+                    Add Phone
+                  </button>
+                </div>
+              )}
+
+              {editingMyPhone && (
+                <form onSubmit={saveMyPhoneNumber} className="p-2.5 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center gap-1.5">
+                  <input
+                    type="tel"
+                    required
+                    maxLength={15}
+                    placeholder="10-digit mobile number"
+                    value={myPhoneDraft}
+                    onChange={(e) => setMyPhoneDraft(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-white border border-indigo-300 rounded-lg text-xs font-mono"
+                  />
+                  <button
+                    type="submit"
+                    disabled={savingMyPhone}
+                    className="px-2.5 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg shrink-0"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingMyPhone(false)}
+                    className="p-1.5 text-slate-500 hover:text-slate-800 shrink-0"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </form>
+              )}
+
               {canManageFlatMembers && pendingFlatMembers.length > 0 && (
                 <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
                   <p className="text-[11px] font-bold uppercase text-amber-900">
@@ -1338,11 +1627,14 @@ function ResidentDashboard({ profile, apartment }) {
                     <div key={m.id} className="bg-white p-2.5 rounded-lg border border-amber-200 flex items-center justify-between gap-2 text-xs">
                       <div className="min-w-0">
                         <p className="font-bold text-slate-900 truncate">{m.full_name}</p>
-                        <p className="text-[11px] text-slate-500">{formatResidentTypeLabel(m.resident_type)}</p>
+                        <p className="text-[11px] text-slate-500">
+                          {formatResidentTypeLabel(m.resident_type)}
+                          {m.phone_number ? ` • ${m.phone_number}` : ''}
+                        </p>
                       </div>
                       <button
                         type="button"
-                        onClick={() => approveFlatMember(m.id)}
+                        onClick={() => approveFlatMember(m)}
                         className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg"
                       >
                         <UserCheck className="w-3.5 h-3.5" />
@@ -1360,7 +1652,7 @@ function ResidentDashboard({ profile, apartment }) {
                       <p className="font-semibold text-slate-900 truncate">
                         {m.full_name} {m.id === profile.id ? <span className="text-slate-400 font-normal">(You)</span> : ''}
                       </p>
-                      <div className="flex items-center gap-1.5 mt-0.5">
+                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                         <span className={`px-2 py-0.2 rounded-full text-[10px] font-semibold ${
                           m.resident_type === 'tenant'
                             ? 'bg-amber-100 text-amber-800'
@@ -1374,6 +1666,27 @@ function ResidentDashboard({ profile, apartment }) {
                           <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
                             Primary
                           </span>
+                        )}
+                        {m.phone_number ? (
+                          <a
+                            href={`tel:${m.phone_number}`}
+                            className="inline-flex items-center gap-1 text-[11px] font-mono text-indigo-700 hover:underline"
+                          >
+                            <Phone className="w-3 h-3" />
+                            <span>{m.phone_number}</span>
+                          </a>
+                        ) : (
+                          <span className="text-[11px] text-slate-400">No phone</span>
+                        )}
+                        {m.id === profile.id && (
+                          <button
+                            type="button"
+                            onClick={() => setEditingMyPhone(true)}
+                            title="Edit My Phone Number"
+                            className="p-0.5 text-slate-400 hover:text-indigo-600"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
                         )}
                       </div>
                     </div>
@@ -1400,10 +1713,24 @@ function ResidentDashboard({ profile, apartment }) {
 
           <div className="md:col-span-2 space-y-4">
             {pendingVisitors.length > 0 && (
-              <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-300 rounded-2xl p-4 shadow-sm">
-                <h4 className="font-bold text-amber-900 text-sm mb-3 flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-600" /> Waiting at Main Gate ({pendingVisitors.length})
-                </h4>
+              <div className="bg-gradient-to-r from-amber-50 to-orange-50 border-2 border-amber-400 rounded-2xl p-4 shadow-md">
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <h4 className="font-bold text-amber-950 text-sm flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 animate-bounce" /> Waiting at Main Gate ({pendingVisitors.length})
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setIsRingingMuted(!isRingingMuted)}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg border transition ${
+                      isRingingMuted
+                        ? 'bg-slate-800 text-white border-slate-800'
+                        : 'bg-white text-amber-900 border-amber-300 hover:bg-amber-100'
+                    }`}
+                  >
+                    {isRingingMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                    <span>{isRingingMuted ? 'Unmute Ring' : 'Mute Ring'}</span>
+                  </button>
+                </div>
                 <div className="space-y-3">
                   {pendingVisitors.map((v) => (
                     <div key={v.id} className="bg-white p-3.5 rounded-xl border border-amber-200 flex flex-wrap items-center justify-between gap-3 shadow-sm">
@@ -1711,24 +2038,32 @@ function ResidentDashboard({ profile, apartment }) {
 
           <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-emerald-500 space-y-4 h-fit">
             <h3 className="font-bold text-slate-800">Active Community Poll</h3>
-            <p className="text-sm text-slate-700 font-medium">Should the RWA install rooftop solar panels for common-area electricity?</p>
-            <div className="space-y-2">
-              {['Yes, Approve', 'No, Defer', 'Need More Quotes'].map((opt) => {
-                const count = votes.filter((v) => v.option_selected === opt).length;
-                return (
-                  <button
-                    key={opt}
-                    disabled={myFlatVoted}
-                    onClick={() => castVote(opt)}
-                    className="w-full p-3 rounded-xl border border-slate-200 hover:border-indigo-500 flex justify-between items-center text-sm disabled:opacity-75"
-                  >
-                    <span className="font-medium">{opt}</span>
-                    <span className="font-bold text-indigo-600">{count} votes</span>
-                  </button>
-                );
-              })}
-            </div>
-            {myFlatVoted && <p className="text-xs text-emerald-600 font-semibold">✓ Flat {profile.flat_number} has voted.</p>}
+            {!activePoll ? (
+              <p className="text-sm text-slate-500">No active poll published by your RWA Admin right now.</p>
+            ) : (
+              <>
+                <p className="text-sm text-slate-700 font-medium">{activePoll.question}</p>
+                <div className="space-y-2">
+                  {(activePoll.options || []).map((opt) => {
+                    const count = votes.filter((v) => v.option_selected === opt).length;
+                    return (
+                      <button
+                        key={opt}
+                        disabled={myFlatVoted}
+                        onClick={() => castVote(opt)}
+                        className="w-full p-3 rounded-xl border border-slate-200 hover:border-indigo-500 flex justify-between items-center text-sm disabled:opacity-75"
+                      >
+                        <span className="font-medium">{opt}</span>
+                        <span className="font-bold text-indigo-600">{count} votes</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {myFlatVoted && (
+                  <p className="text-xs text-emerald-600 font-semibold">✓ Flat {profile.flat_number} has voted.</p>
+                )}
+              </>
+            )}
           </div>
         </div>
       )}
@@ -1736,25 +2071,74 @@ function ResidentDashboard({ profile, apartment }) {
   );
 }
 
-/* ==================== 4. SECURITY GUARD DASHBOARD (NATIVE CAPACITOR CAMERA) ==================== */
+/* ==================== 4. SECURITY GUARD DASHBOARD (REGISTERED FLAT DROPDOWN + ONE-TAP CALL) ==================== */
 function SecurityDashboard({ profile }) {
   const [visitors, setVisitors] = useState([]);
+  const [registeredFlats, setRegisteredFlats] = useState([]);
   const [otpInput, setOtpInput] = useState('');
   const [vName, setVName] = useState('');
   const [vType, setVType] = useState('Delivery');
   const [flatNo, setFlatNo] = useState('');
+  const [isManualFlat, setIsManualFlat] = useState(false);
   const [vehicle, setVehicle] = useState('');
   const [photoData, setPhotoData] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     fetchVisitors();
+    fetchRegisteredFlats();
     const channel = supabase
       .channel(`guard-gate-${profile.apartment_id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'visitor_logs' }, () => fetchVisitors())
       .subscribe();
     return () => supabase.removeChannel(channel);
   }, [profile.apartment_id]);
+
+  async function fetchRegisteredFlats() {
+    if (!profile.apartment_id) return;
+
+    const [{ data: resData }, { data: invData }] = await Promise.all([
+      supabase
+        .from('profiles')
+        .select('flat_number, full_name, phone_number, resident_type, is_flat_primary')
+        .eq('apartment_id', profile.apartment_id)
+        .eq('role', 'resident')
+        .eq('is_approved', true),
+      supabase
+        .from('maintenance_invoices')
+        .select('flat_number')
+        .eq('apartment_id', profile.apartment_id),
+    ]);
+
+    const grouped = new Map();
+
+    (resData || []).forEach((row) => {
+      if (!row.flat_number) return;
+      const flatKey = row.flat_number.toUpperCase().trim();
+      if (!grouped.has(flatKey)) grouped.set(flatKey, []);
+      grouped.get(flatKey).push(row);
+    });
+
+    (invData || []).forEach((row) => {
+      if (!row.flat_number) return;
+      const flatKey = row.flat_number.toUpperCase().trim();
+      if (!grouped.has(flatKey)) grouped.set(flatKey, []);
+    });
+
+    const list = Array.from(grouped.entries())
+      .map(([flat, members]) => {
+        members.sort((a, b) => Number(Boolean(b.is_flat_primary)) - Number(Boolean(a.is_flat_primary)));
+        const names = members.length > 0 ? members.map((m) => m.full_name).join(', ') : 'Registered Flat';
+        return { flat, names, members };
+      })
+      .sort((a, b) => a.flat.localeCompare(b.flat, undefined, { numeric: true }));
+
+    setRegisteredFlats(list);
+    if (list.length > 0) {
+      setIsManualFlat(false);
+      setFlatNo((prev) => prev || list[0].flat);
+    }
+  }
 
   async function fetchVisitors() {
     const { data } = await supabase
@@ -1805,6 +2189,10 @@ function SecurityDashboard({ profile }) {
 
   async function logSpotVisitor(e) {
     e.preventDefault();
+    if (!flatNo.trim()) {
+      alert('Please select or enter a valid Flat Number.');
+      return;
+    }
     setSubmitting(true);
     const { error } = await supabase.from('visitor_logs').insert({
       apartment_id: profile.apartment_id,
@@ -1819,7 +2207,10 @@ function SecurityDashboard({ profile }) {
     if (error) alert('Error logging visitor: ' + error.message);
     else {
       setVName('');
-      setFlatNo('');
+      if (isManualFlat && registeredFlats.length > 0) {
+        setIsManualFlat(false);
+        setFlatNo(registeredFlats[0].flat);
+      }
       setVehicle('');
       setPhotoData(null);
       fetchVisitors();
@@ -1833,6 +2224,10 @@ function SecurityDashboard({ profile }) {
     await supabase.from('visitor_logs').update(payload).eq('id', id);
     fetchVisitors();
   }
+
+  const selectedFlatObj = registeredFlats.find(
+    (item) => item.flat === flatNo.toUpperCase().trim()
+  );
 
   return (
     <div className="grid md:grid-cols-3 gap-6">
@@ -1853,7 +2248,82 @@ function SecurityDashboard({ profile }) {
           </h3>
           <form onSubmit={logSpotVisitor} className="space-y-3">
             <input type="text" required placeholder="Visitor Name" value={vName} onChange={(e) => setVName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm" />
-            <input type="text" required placeholder="Flat Number (e.g. B-402)" value={flatNo} onChange={(e) => setFlatNo(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm" />
+
+            {/* Registered Flat Dropdown + Manual Fallback */}
+            {!isManualFlat ? (
+              <div className="space-y-2">
+                <select
+                  required
+                  value={flatNo}
+                  onChange={(e) => {
+                    if (e.target.value === '__MANUAL__') {
+                      setIsManualFlat(true);
+                      setFlatNo('');
+                    } else {
+                      setFlatNo(e.target.value);
+                    }
+                  }}
+                  className="w-full px-3 py-2 border rounded-lg text-sm bg-white font-medium text-slate-800"
+                >
+                  <option value="" disabled>
+                    {registeredFlats.length === 0 ? '-- No approved flats found --' : '-- Select Registered Flat --'}
+                  </option>
+                  {registeredFlats.map((item) => (
+                    <option key={item.flat} value={item.flat}>
+                      Flat {item.flat} — {item.names}
+                    </option>
+                  ))}
+                  <option value="__MANUAL__">+ Enter flat number manually...</option>
+                </select>
+
+                {/* One-Tap Intercom Voice Call Strip for Selected Flat */}
+                {selectedFlatObj && selectedFlatObj.members.some((m) => m.phone_number) && (
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+                    <p className="text-[10px] font-bold uppercase text-slate-500">
+                      Flat {selectedFlatObj.flat} Intercom / Direct Call
+                    </p>
+                    {selectedFlatObj.members
+                      .filter((m) => m.phone_number)
+                      .map((m, idx) => (
+                        <div key={idx} className="flex items-center justify-between gap-2 text-xs">
+                          <span className="text-slate-700 font-medium truncate">
+                            {m.full_name} ({formatResidentTypeLabel(m.resident_type)})
+                          </span>
+                          <a
+                            href={`tel:${m.phone_number}`}
+                            className="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold rounded-lg"
+                          >
+                            <Phone className="w-3 h-3" />
+                            <span>Call</span>
+                          </a>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <input
+                  type="text"
+                  required
+                  placeholder="Flat Number (e.g. B-402)"
+                  value={flatNo}
+                  onChange={(e) => setFlatNo(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsManualFlat(false);
+                    setFlatNo(registeredFlats[0]?.flat || '');
+                  }}
+                  className="text-xs text-indigo-600 font-semibold hover:underline"
+                >
+                  ← Back to flats dropdown
+                </button>
+              </div>
+            )}
+
             <select value={vType} onChange={(e) => setVType(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
               <option value="Delivery">Delivery</option>
               <option value="Guest">Guest</option>
@@ -1920,7 +2390,7 @@ function SecurityDashboard({ profile }) {
   );
 }
 
-/* ==================== 5. ADMIN DASHBOARD (UPI VERIFICATION + RESIDENT TYPE TAGS) ==================== */
+/* ==================== 5. ADMIN DASHBOARD (POLL MANAGEMENT + WHATSAPP APPROVAL + UPI) ==================== */
 function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
   const amenitiesList = apartment?.amenities?.length ? apartment.amenities : DEFAULT_AMENITIES;
   const slotsList = apartment?.amenity_slots?.length ? apartment.amenity_slots : DEFAULT_SLOTS;
@@ -1930,6 +2400,13 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
   const [invoices, setInvoices] = useState([]);
   const [tickets, setTickets] = useState([]);
   const [notices, setNotices] = useState([]);
+
+  // Community Polls Management State
+  const [polls, setPolls] = useState([]);
+  const [pollVotes, setPollVotes] = useState([]);
+  const [pollQuestion, setPollQuestion] = useState('');
+  const [pollOptionsInput, setPollOptionsInput] = useState('Yes, Approve, No, Defer, Need More Quotes');
+  const [creatingPoll, setCreatingPoll] = useState(false);
 
   const [billingMode, setBillingMode] = useState('bulk');
   const [invFlat, setInvFlat] = useState('');
@@ -1960,6 +2437,7 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
       fetchInvoices();
       fetchTickets();
       fetchNotices();
+      fetchPolls();
     }
   }, [profile?.apartment_id]);
 
@@ -1999,6 +2477,60 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
     if (data) setNotices(data);
   }
 
+  async function fetchPolls() {
+    const [{ data: pData }, { data: vData }] = await Promise.all([
+      supabase
+        .from('polls')
+        .select('*')
+        .eq('apartment_id', profile.apartment_id)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('poll_votes')
+        .select('*')
+        .eq('apartment_id', profile.apartment_id),
+    ]);
+    if (pData) setPolls(pData);
+    if (vData) setPollVotes(vData);
+  }
+
+  async function createCommunityPoll(e) {
+    e.preventDefault();
+    const parsedOptions = pollOptionsInput.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!pollQuestion.trim() || parsedOptions.length < 2) {
+      alert('Enter a poll question and at least 2 comma-separated options.');
+      return;
+    }
+    setCreatingPoll(true);
+
+    // Deactivate older active polls so the new poll becomes the active one
+    await supabase
+      .from('polls')
+      .update({ is_active: false })
+      .eq('apartment_id', profile.apartment_id)
+      .eq('is_active', true);
+
+    const { error } = await supabase.from('polls').insert({
+      apartment_id: profile.apartment_id,
+      question: pollQuestion.trim(),
+      options: parsedOptions,
+      is_active: true,
+    });
+
+    if (error) {
+      alert('Failed to publish poll: ' + error.message);
+    } else {
+      setPollQuestion('');
+      fetchPolls();
+      alert('Community poll published to all residents!');
+    }
+    setCreatingPoll(false);
+  }
+
+  async function closeCommunityPoll(pollId) {
+    await supabase.from('polls').update({ is_active: false }).eq('id', pollId);
+    fetchPolls();
+  }
+
   async function approveUser(userToApprove) {
     let promotePrimary = userToApprove.is_flat_primary;
     if (userToApprove.role === 'resident' && userToApprove.flat_number && userToApprove.resident_type === 'owner') {
@@ -2012,11 +2544,21 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
       if (!hasApprovedPrimary) promotePrimary = true;
     }
 
-    await supabase
+    const { error } = await supabase
       .from('profiles')
       .update({ is_approved: true, is_flat_primary: promotePrimary })
       .eq('id', userToApprove.id);
-    fetchUsers();
+
+    if (error) {
+      alert('Failed to approve account: ' + error.message);
+      return;
+    }
+
+    await fetchUsers();
+
+    if (userToApprove.phone_number) {
+      sendApprovalWhatsApp(apartment?.name, userToApprove, promotePrimary);
+    }
   }
 
   async function verifyUpiPayment(invoiceId) {
@@ -2146,6 +2688,7 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
   }
 
   const pendingUsers = users.filter((u) => !u.is_approved);
+  const verifiedUsers = users.filter((u) => u.is_approved);
   const pendingUpiVerifications = invoices.filter((i) => i.status === 'Verification Pending');
 
   return (
@@ -2188,7 +2731,7 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
         ) : (
           <div className="divide-y">
             {pendingUsers.map((u) => (
-              <div key={u.id} className="py-3 flex items-center justify-between gap-2">
+              <div key={u.id} className="py-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="font-semibold text-sm text-slate-900">{u.full_name}</p>
                   <p className="text-xs text-slate-500 capitalize">
@@ -2197,10 +2740,15 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
                       {u.role === 'resident' ? formatResidentTypeLabel(u.resident_type) : u.role}
                     </span>{' '}
                     {u.flat_number ? `• Flat ${u.flat_number}` : ''}
+                    {u.phone_number ? ` • ${u.phone_number}` : ''}
                   </p>
                 </div>
-                <button onClick={() => approveUser(u)} className="px-3.5 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shrink-0">
-                  Approve Account
+                <button
+                  onClick={() => approveUser(u)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shrink-0 shadow-sm"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  <span>{u.phone_number ? 'Approve & Send WhatsApp' : 'Approve Account'}</span>
                 </button>
               </div>
             ))}
@@ -2370,6 +2918,141 @@ function AdminDashboard({ profile, apartment, onApartmentUpdated }) {
               ))}
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Manage Community Polls Card */}
+      <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-emerald-600 space-y-4">
+        <div>
+          <h3 className="font-bold text-slate-800">Manage Community Polls</h3>
+          <p className="text-xs text-slate-500 mt-0.5">Create a poll for residents to vote on (one vote per flat) and view live results.</p>
+        </div>
+
+        <form onSubmit={createCommunityPoll} className="grid md:grid-cols-2 gap-3">
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-slate-700 uppercase mb-1">Poll Question</label>
+            <input
+              type="text"
+              required
+              placeholder="e.g. Should we install EV charging points in Basement 1?"
+              value={pollQuestion}
+              onChange={(e) => setPollQuestion(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm"
+            />
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-slate-700 uppercase mb-1">Options (Comma-Separated)</label>
+            <input
+              type="text"
+              required
+              value={pollOptionsInput}
+              onChange={(e) => setPollOptionsInput(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs"
+            />
+          </div>
+          <div className="md:col-span-2 flex justify-end">
+            <button
+              disabled={creatingPoll}
+              className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl shadow-sm"
+            >
+              {creatingPoll ? 'Publishing...' : 'Publish New Active Poll'}
+            </button>
+          </div>
+        </form>
+
+        {polls.length > 0 && (
+          <div className="pt-3 border-t space-y-2.5">
+            <p className="text-[11px] font-bold uppercase text-slate-500">Poll Results & History</p>
+            {polls.map((p) => {
+              const thisPollVotes = pollVotes.filter((v) => v.poll_id === p.id);
+              return (
+                <div key={p.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-bold text-slate-900">{p.question}</p>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className={`px-2 py-0.5 rounded-full font-bold ${p.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>
+                        {p.is_active ? 'Active' : 'Closed'}
+                      </span>
+                      {p.is_active && (
+                        <button
+                          type="button"
+                          onClick={() => closeCommunityPoll(p.id)}
+                          className="px-2 py-0.5 bg-red-600 text-white rounded font-semibold"
+                        >
+                          Close
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {(p.options || []).map((opt) => {
+                      const cnt = thisPollVotes.filter((v) => v.option_selected === opt).length;
+                      return (
+                        <span key={opt} className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg font-medium">
+                          {opt}: <strong className="text-indigo-700">{cnt}</strong>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Society Members & Contact Directory (With Call + WhatsApp Confirmation) */}
+      <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 border-t-4 border-t-indigo-500">
+        <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+          <Phone className="w-4 h-4 text-indigo-600" /> Verified Society Directory ({verifiedUsers.length})
+        </h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-slate-50 text-slate-600 border-b">
+              <tr>
+                <th className="p-2.5">Flat</th>
+                <th className="p-2.5">Name</th>
+                <th className="p-2.5">Role / Type</th>
+                <th className="p-2.5">Mobile</th>
+                <th className="p-2.5">Quick Contact</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {verifiedUsers.map((u) => (
+                <tr key={u.id}>
+                  <td className="p-2.5 font-bold text-indigo-700">{u.flat_number || 'Staff'}</td>
+                  <td className="p-2.5 font-semibold text-slate-900">{u.full_name}</td>
+                  <td className="p-2.5 capitalize">
+                    {u.role === 'resident' ? formatResidentTypeLabel(u.resident_type) : u.role}
+                  </td>
+                  <td className="p-2.5 font-mono">{u.phone_number || 'Not added'}</td>
+                  <td className="p-2.5">
+                    {u.phone_number ? (
+                      <div className="flex items-center gap-1.5">
+                        <a
+                          href={`tel:${u.phone_number}`}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-800 text-white rounded-lg font-semibold"
+                        >
+                          <Phone className="w-3 h-3" />
+                          <span>Call</span>
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => sendApprovalWhatsApp(apartment?.name, u, u.is_flat_primary)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold"
+                        >
+                          <MessageCircle className="w-3 h-3" />
+                          <span>WhatsApp</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
 
