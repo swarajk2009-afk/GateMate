@@ -46,7 +46,7 @@ jobs:
           ./node_modules/.bin/cap sync android
           MANIFEST=$(find android -name "AndroidManifest.xml" | grep "src/main" | head -n 1)
           echo "Updating manifest: $MANIFEST"
-          sed -i 's/<\/manifest>/<uses-permission android:name="android.permission.CAMERA" \/><uses-permission android:name="android.permission.VIBRATE" \/><uses-permission android:name="android.permission.POST_NOTIFICATIONS" \/><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" \/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" \/><queries><intent><action android:name="android.intent.action.VIEW" \/><data android:scheme="upi" \/><\/intent><\/queries><\/manifest>/' "$MANIFEST"
+          sed -i 's/<\/manifest>/<uses-permission android:name="android.permission.CAMERA" \/><uses-permission android:name="android.permission.VIBRATE" \/><uses-permission android:name="android.permission.POST_NOTIFICATIONS" \/><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" \/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" \/><queries><intent><action android:name="android.intent.action.VIEW" \/><data android:scheme="upi" \/><\/intent><intent><action android:name="android.intent.action.VIEW" \/><data android:scheme="https" \/><\/intent><intent><action android:name="android.intent.action.DIAL" \/><\/intent><\/queries><\/manifest>/' "$MANIFEST"
 
       - name: Build Debug APK
         env:
